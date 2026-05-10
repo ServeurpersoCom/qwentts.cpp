@@ -9,6 +9,7 @@
 #include "pipeline-codec.h"
 
 #include "causal-trans-conv.h"
+#include "debug.h"
 #include "qt-error.h"
 
 #include <cmath>
@@ -219,7 +220,8 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
     return audio;
 }
 
-std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc, const float * audio, int n_samples) {
+std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc, const float * audio, int n_samples,
+                                           const char * dump_dir) {
     if (n_samples <= 0 || (n_samples % QWEN_TOKENIZER_HOP_LENGTH) != 0) {
         qt_log(QT_LOG_ERROR, "[Pipeline] n_samples must be a positive multiple of %d (got %d)",
                QWEN_TOKENIZER_HOP_LENGTH, n_samples);
@@ -276,10 +278,16 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc, const float * aud
     // Transpose to get the buffer layout we want once read back to host.
     h = ggml_cont(gctx, ggml_transpose(gctx, h));  // ne=(512, T)
 
-    const char * dump_dir = getenv("QWENTTS_DEBUG_DUMP");
-    if (dump_dir) {
-        ggml_set_output(h_seanet);
-        ggml_set_name(h_seanet, "seanet_out");
+    const char * dump = dump_dir;
+    struct ggml_tensor * h_seanet_dump = NULL;
+    if (dump) {
+        // SEANet output naturally lands as channel-first ggml ne=(T, hidden).
+        // The encoder_transformer and downsample dumps further down are
+        // T-first numpy [T, hidden], so we transpose the SEANet view to
+        // match before pinning it as a graph output.
+        h_seanet_dump = ggml_cont(gctx, ggml_transpose(gctx, h_seanet));
+        ggml_set_output(h_seanet_dump);
+        ggml_set_name(h_seanet_dump, "seanet_out_dump");
         ggml_set_output(h_et);
         ggml_set_name(h_et, "enc_transformer_out");
     }
@@ -289,6 +297,9 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc, const float * aud
 
     struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
     ggml_build_forward_expand(graph, h);
+    if (h_seanet_dump) {
+        ggml_build_forward_expand(graph, h_seanet_dump);
+    }
 
     if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
         qt_log(QT_LOG_ERROR, "[Pipeline] encode sched_alloc_graph failed");
@@ -315,24 +326,22 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc, const float * aud
         return {};
     }
 
-    if (dump_dir) {
-        auto dump = [&](const char * fname, struct ggml_tensor * t) {
+    if (dump) {
+        DebugDumper d;
+        debug_init(&d, dump);
+        // ggml ne layout matches numpy's last-dim-fastest, so a [d0, d1]
+        // tensor in ggml dumps as a [d1, d0] numpy array. We emit the
+        // shape ggml-side (ne[1], ne[0]) so numpy reshapes it correctly
+        // on read. Values themselves are the same memory order.
+        auto dump2 = [&](const char * name, struct ggml_tensor * t) {
             size_t             n = ggml_nelements(t);
             std::vector<float> buf(n);
             ggml_backend_tensor_get(t, buf.data(), 0, n * sizeof(float));
-            char path[512];
-            snprintf(path, sizeof(path), "%s/%s.f32", dump_dir, fname);
-            FILE * f = fopen(path, "wb");
-            if (f) {
-                fwrite(buf.data(), sizeof(float), n, f);
-                fclose(f);
-                qt_log(QT_LOG_INFO, "[Pipeline] Dumped %s: %zu floats, ne=(%lld, %lld, %lld, %lld)", path, n,
-                       (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3]);
-            }
+            debug_dump_2d(&d, name, buf.data(), (int) t->ne[1], (int) t->ne[0]);
         };
-        dump("seanet_out", h_seanet);
-        dump("enc_transformer_out", h_et);
-        dump("enc_downsample_out", h);
+        dump2("seanet-out",          h_seanet_dump);
+        dump2("enc-transformer-out", h_et);
+        dump2("codec-pre-fsq",       h);
     }
 
     // Read back the post-downsample hidden buffer for CPU-side RVQ encode.

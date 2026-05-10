@@ -86,12 +86,17 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
 std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * codes, int K, int T);
 
 // Encode a 24 kHz mono waveform into RVQ codes.
-//   audio   : [n_samples] f32 mono 24 kHz. Must be a multiple of
-//             QWEN_TOKENIZER_HOP_LENGTH (1920); the caller is expected
-//             to pad with zeros if needed.
+//   audio    : [n_samples] f32 mono 24 kHz. Must be a multiple of
+//              QWEN_TOKENIZER_HOP_LENGTH (1920); the caller is expected
+//              to pad with zeros if needed.
+//   dump_dir : optional path. When non NULL, dumps the SEANet, encoder
+//              transformer and post-downsample (pre-FSQ latents) buffers
+//              into seanet-out.bin, enc-transformer-out.bin and
+//              codec-pre-fsq.bin under that directory. Quiet otherwise.
 // Returns codes flat as [K, T] row-major, K = QWEN_TOKENIZER_NUM_CODEBOOKS,
 // T = n_samples / 1920. Empty on failure.
-std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc, const float * audio, int n_samples);
+std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc, const float * audio, int n_samples,
+                                           const char * dump_dir = NULL);
 
 // Free every backend buffer and ggml context. Safe to call on a zeroed struct.
 void pipeline_codec_free(PipelineCodec * pc);

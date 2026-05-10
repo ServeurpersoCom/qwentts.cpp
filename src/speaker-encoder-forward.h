@@ -49,35 +49,39 @@ static struct ggml_tensor * spk_conv1d_same(struct ggml_context * ctx,
                                             struct ggml_tensor *  b,
                                             int                   dilation) {
     const int K   = (int) w->ne[0];
+    const int IC  = (int) w->ne[1];
     const int OC  = (int) w->ne[2];
     const int pad = ((K - 1) * dilation) / 2;
 
-    // ggml_pad_reflect_1d pads ne[0]. Our temporal axis is ne[1], so
-    // transpose first, pad, transpose back.
-    struct ggml_tensor * x_t = ggml_cont(ctx, ggml_transpose(ctx, x));  // [T, in_c]
+    // ggml_pad_reflect_1d pads the innermost axis ne[0]. Our temporal
+    // axis is ne[1], so we transpose to bring T to ne[0], pad, and keep
+    // it that way : the im2col downstream expects ne[0]=T_pad, ne[1]=IC,
+    // which is exactly the layout we end up with here.
+    struct ggml_tensor * x_t = ggml_cont(ctx, ggml_transpose(ctx, x));    // ne=(T, IC)
     if (pad > 0) {
-        x_t = ggml_pad_reflect_1d(ctx, x_t, pad, pad);                  // [T+2*pad, in_c]
+        x_t = ggml_pad_reflect_1d(ctx, x_t, pad, pad);                    // ne=(T+2*pad, IC)
     }
-    x_t = ggml_cont(ctx, ggml_transpose(ctx, x_t));                     // [in_c, T+2*pad]
 
-    // Reshape as [W=T_pad, H=1, IC=in_c, N=1] for ggml_im2col 1D.
-    struct ggml_tensor * x4d   = ggml_reshape_4d(ctx, x_t, x_t->ne[1], 1, x_t->ne[0], 1);
-    struct ggml_tensor * dummy = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, K, 1, x_t->ne[0], 1);
+    // Reshape to 4D for ggml_im2col 1D : ne=(T_pad, IC, 1, 1).
+    struct ggml_tensor * x4d = ggml_reshape_4d(ctx, x_t, x_t->ne[0], IC, 1, 1);
+
+    // Dummy F32 kernel with the (K, IC) shape ggml_im2col needs to read
+    // off both axes. Borrowing only the ne and not the real weight data
+    // avoids the impl's src0 type assert when w is quantized.
+    struct ggml_tensor * dummy = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, K, IC, 1, 1);
     ggml_set_name(dummy, "spk.im2col_kernel");
 
-    // im2col output shape with is_2D=false : ne = (a.ne[1]*a.ne[0], OW, b.ne[2], 1)
-    // = (K, T_out, in_c, 1) here. To matmul against the [K*in_c, out_c]
-    // weight we need [K*in_c, T_out] which means permuting (K, IC, T)
-    // before flattening. ggml_permute(0, 2, 1, 3) swaps axes 1 and 2.
+    // im2col with is_2D=false : the constructor declares ne[0]=IC*K and
+    // ne[1]=OW, and the impl writes the buffer in (k inner, ic middle,
+    // t outer) order, which matches that ne directly. A reshape_2d to
+    // (IC*K, T_out) reads col_2d[ic*K + k, t], lining up with the
+    // weight reshape w_2d[ic*K + k, oc] for the mul_mat below.
     struct ggml_tensor * col   = ggml_im2col(ctx, dummy, x4d, 1, 1, 0, 0, dilation, 1, false, GGML_TYPE_F32);
     int                  T_out = (int) col->ne[1];
-    int                  IC    = (int) col->ne[2];
-    col                        = ggml_cont(ctx, ggml_permute(ctx, col, 0, 2, 1, 3));  // [K, IC, T, 1]
     col                        = ggml_reshape_2d(ctx, col, K * IC, T_out);
 
-    // weight [K, in_c, out_c] reshape as [K * in_c, out_c]. mul_mat
-    // returns [out_c, T_out].
-    struct ggml_tensor * w2d = ggml_reshape_2d(ctx, w, K * (int) w->ne[1], OC);
+    // Weight reshape : [K, IC, OC] -> [K*IC, OC]. mul_mat returns [OC, T_out].
+    struct ggml_tensor * w2d = ggml_reshape_2d(ctx, w, K * IC, OC);
     struct ggml_tensor * y   = ggml_mul_mat(ctx, w2d, col);
     ggml_mul_mat_set_prec(y, GGML_PREC_F32);
 
@@ -271,6 +275,16 @@ static struct ggml_tensor * spk_asp(struct ggml_context * ctx, const SpkEncASP &
 // Inputs :
 //   audio_padded   [T_pad]    f32, host or backend tensor
 //   mel constants  hann/dft_real/dft_imag/mel_basis backend tensors
+//   mel_out        optional out param. When non NULL, receives the post
+//                  mel_spectrogram tensor [n_mels, T_frames] so the caller
+//                  can mark it as a graph output and pull its values back.
+//   mag_out        optional out param. When non NULL, receives the post
+//                  STFT magnitude tensor [n_freq, T_frames] for debug
+//                  bisection between the STFT and the mel filtering.
+//   frontend_out   optional. Post conv0 TDNN k=5 + ReLU output [512, T].
+//   block3_out     optional. Post third SE-Res2Net block output [512, T].
+//   mfa_out        optional. Post multi-layer feature aggregation [1536, T].
+//   asp_out        optional. Post attentive statistical pooling [3072, 1].
 // Output : [enc_dim] f32, the speaker embedding (typically 2048 dims).
 static struct ggml_tensor * speaker_encoder_forward(struct ggml_context *         ctx,
                                                     const SpeakerEncoderWeights * sw,
@@ -279,25 +293,46 @@ static struct ggml_tensor * speaker_encoder_forward(struct ggml_context *       
                                                     struct ggml_tensor *          dft_real,
                                                     struct ggml_tensor *          dft_imag,
                                                     struct ggml_tensor *          mel_basis,
-                                                    const AudioMelConfig &        mel_cfg) {
+                                                    const AudioMelConfig &        mel_cfg,
+                                                    struct ggml_tensor **         mel_out      = NULL,
+                                                    struct ggml_tensor **         mag_out      = NULL,
+                                                    struct ggml_tensor **         frontend_out = NULL,
+                                                    struct ggml_tensor **         block3_out   = NULL,
+                                                    struct ggml_tensor **         mfa_out      = NULL,
+                                                    struct ggml_tensor **         asp_out      = NULL) {
     // Mel : [n_mels=128, T_frames]
-    struct ggml_tensor * mel = audio_mel_build_graph(ctx, audio_padded, hann, dft_real, dft_imag, mel_basis, mel_cfg);
+    struct ggml_tensor * mel = audio_mel_build_graph(ctx, audio_padded, hann, dft_real, dft_imag, mel_basis, mel_cfg, mag_out);
+    if (mel_out) {
+        *mel_out = mel;
+    }
 
     // Frontend conv0 TDNN k=5 + ReLU : 128 -> 512, T preserved.
     struct ggml_tensor * h = spk_tdnn(ctx, sw->conv0, mel, 1);
+    if (frontend_out) {
+        *frontend_out = h;
+    }
 
     // Three SE-Res2Net blocks at dilations 2, 3, 4.
     struct ggml_tensor * b1 = spk_block(ctx, sw->blocks[0], h, sw->res2net_scale);
     struct ggml_tensor * b2 = spk_block(ctx, sw->blocks[1], b1, sw->res2net_scale);
     struct ggml_tensor * b3 = spk_block(ctx, sw->blocks[2], b2, sw->res2net_scale);
+    if (block3_out) {
+        *block3_out = b3;
+    }
 
     // Multi-layer feature aggregation : cat blk1..3 then 1x1 TDNN + ReLU.
     struct ggml_tensor * cat = ggml_concat(ctx, b1, b2, 0);
     cat                      = ggml_concat(ctx, cat, b3, 0);    // [1536, T]
     struct ggml_tensor * mfa = spk_tdnn(ctx, sw->mfa, cat, 1);  // [1536, T]
+    if (mfa_out) {
+        *mfa_out = mfa;
+    }
 
     // Attentive statistical pooling : [1536, T] -> [3072, 1].
     struct ggml_tensor * stats = spk_asp(ctx, sw->asp, mfa);
+    if (asp_out) {
+        *asp_out = stats;
+    }
 
     // Final FC k=1 : [3072, 1] -> [enc_dim, 1].
     struct ggml_tensor * emb = spk_conv1d_same(ctx, stats, sw->fc_w, sw->fc_b, 1);

@@ -256,7 +256,7 @@ bool pipeline_tts_synthesize(PipelineTTS *                       pt,
                     "[Pipeline] FATAL: --ref-audio requires a model with a loaded speaker encoder (Base only)\n");
             return false;
         }
-        if (!speaker_encoder_extract(&pt->speaker_encoder, pt->sched, params.ref_audio, ref_spk_emb)) {
+        if (!speaker_encoder_extract(&pt->speaker_encoder, pt->sched, params.ref_audio, ref_spk_emb, params.dump_dir)) {
             return false;
         }
         if ((int) ref_spk_emb.size() != pt->talker.hidden_size) {
@@ -292,7 +292,7 @@ bool pipeline_tts_synthesize(PipelineTTS *                       pt,
             return false;
         }
         int aligned_T = (T_codec_audio / QWEN_TOKENIZER_HOP_LENGTH) * QWEN_TOKENIZER_HOP_LENGTH;
-        ref_codes     = pipeline_codec_encode(&pt->codec, raw, aligned_T);
+        ref_codes     = pipeline_codec_encode(&pt->codec, raw, aligned_T, params.dump_dir);
         std::free(raw);
         if (ref_codes.empty()) {
             fprintf(stderr, "[Pipeline] FATAL: pipeline_codec_encode returned empty codes\n");

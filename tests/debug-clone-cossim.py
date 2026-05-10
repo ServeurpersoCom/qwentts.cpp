@@ -43,10 +43,170 @@ DEFAULT_REF_TEXT  = "../examples/freeman.txt"
 
 # Mode B adds two pre-talker stages to the standard list : the speaker
 # embedding extracted from the reference audio (ECAPA forward, projected to
-# talker hidden), and the reference codec frames at 12.5 Hz.
+# talker hidden), and the reference codec frames at 12.5 Hz. Plus three
+# bisection stages for the 12Hz codec encoder (SEANet output, encoder
+# transformer output, post-downsample = pre-FSQ latents), the mel front end
+# (mel-mag and mel-spk), and four ECAPA forward bisection stages (frontend
+# conv0 output, third SE-Res2Net block output, MFA output, ASP output).
 STAGES_CLONE = cc.STAGES_STANDARD + [
-    ("SpeakerEmb", "speaker-emb.bin"),
+    ("MelHann",         "mel-hann.bin"),
+    ("MelBasis",        "mel-basis.bin"),
+    ("MelMag",          "mel-mag.bin"),
+    ("MelSpk",          "mel-spk.bin"),
+    ("SeanetOut",       "seanet-out.bin"),
+    ("EncTransformer",  "enc-transformer-out.bin"),
+    ("CodecPreFSQ",     "codec-pre-fsq.bin"),
+    ("SpkFrontend",     "spk-frontend.bin"),
+    ("SpkBlock3",       "spk-block3.bin"),
+    ("SpkMFA",          "spk-mfa.bin"),
+    ("SpkASP",          "spk-asp.bin"),
+    ("SpeakerEmb",      "speaker-emb.bin"),
 ]
+
+def install_clone_hooks(model, dump_dir):
+    """Capture the codec encoder bisection points (SEANet, encoder_transformer,
+    downsample = pre-FSQ latents), the ECAPA mel front end input, and four
+    ECAPA forward bisection points (frontend conv0 output, third SE-Res2Net
+    block output, MFA output, ASP output). Mirrors exactly what
+    pipeline-codec.cpp and speaker-encoder-extract.h dump on the C++ side,
+    with matching shapes : [T, 512] for the codec stages, [T_frames, 128]
+    for the speaker mel, [T_frames, 512] for spk-frontend / spk-block3,
+    [T_frames, 1536] for spk-mfa, and [1, 3072] for spk-asp."""
+    enc = model.speech_tokenizer.model.encoder
+
+    seen_seanet = {"done": False}
+    def hook_seanet(module, args, output):
+        if seen_seanet["done"]:
+            return
+        out = output[0] if isinstance(output, tuple) else output
+        # output shape : [B=1, C=512, T_emb] channel-first from MimiEncoder.
+        cc.save_dump(os.path.join(dump_dir, "seanet-out.bin"), out[0].transpose(0, 1).contiguous())
+        seen_seanet["done"] = True
+    enc.encoder.register_forward_hook(hook_seanet)
+
+    seen_enct = {"done": False}
+    def hook_enct(module, args, output):
+        if seen_enct["done"]:
+            return
+        out = output[0] if isinstance(output, tuple) else output
+        # encoder_transformer is fed [B, T, 512] T-first and returns the
+        # same shape, so no transpose needed before the [0] slice.
+        cc.save_dump(os.path.join(dump_dir, "enc-transformer-out.bin"), out[0])
+        seen_enct["done"] = True
+    enc.encoder_transformer.register_forward_hook(hook_enct)
+
+    seen_down = {"done": False}
+    def hook_down(module, args, output):
+        if seen_down["done"]:
+            return
+        out = output[0] if isinstance(output, tuple) else output
+        # downsample output : [B=1, C=512, T] channel-first, transpose to
+        # [T, 512] to match the C++ post-downsample dump.
+        cc.save_dump(os.path.join(dump_dir, "codec-pre-fsq.bin"), out[0].transpose(0, 1).contiguous())
+        seen_down["done"] = True
+    enc.downsample.register_forward_hook(hook_down)
+
+    seen_mel = {"done": False}
+    def hook_spk_pre(module, args, kwargs):
+        if seen_mel["done"]:
+            return
+        # mels arrives as args[0] with shape [B=1, T_frames, n_mels=128]
+        # post the .transpose(1, 2) inside extract_speaker_embedding. The
+        # C++ side now dumps the same T-first layout, so we keep mels[0]
+        # as is to preserve [T_frames, n_mels].
+        mels = args[0] if args else kwargs.get("mels", None)
+        if mels is None or mels.dim() != 3:
+            return
+        cc.save_dump(os.path.join(dump_dir, "mel-spk.bin"), mels[0])
+        seen_mel["done"] = True
+    model.speaker_encoder.register_forward_pre_hook(hook_spk_pre, with_kwargs=True)
+
+    # ECAPA forward bisection. blocks[0] is the frontend TimeDelayNetBlock
+    # mapped to spk_tdnn(conv0) on the C++ side. blocks[3] is the third
+    # SE-Res2Net block, mapped to the C++ blocks[2] output. mfa and asp
+    # speak for themselves. All these modules ingest channel-first
+    # [B, C, T] tensors so we transpose to [T, C] before save_dump for a
+    # direct compare against the C++ ne=(C, T) raw memory dumps.
+    spk = model.speaker_encoder
+
+    seen_front = {"done": False}
+    def hook_frontend(module, args, output):
+        if seen_front["done"]:
+            return
+        out = output[0] if isinstance(output, tuple) else output
+        # output shape : [B=1, 512, T_frames] channel-first.
+        cc.save_dump(os.path.join(dump_dir, "spk-frontend.bin"), out[0].transpose(0, 1).contiguous())
+        seen_front["done"] = True
+    spk.blocks[0].register_forward_hook(hook_frontend)
+
+    seen_blk3 = {"done": False}
+    def hook_block3(module, args, output):
+        if seen_blk3["done"]:
+            return
+        out = output[0] if isinstance(output, tuple) else output
+        # output shape : [B=1, 512, T_frames] channel-first.
+        cc.save_dump(os.path.join(dump_dir, "spk-block3.bin"), out[0].transpose(0, 1).contiguous())
+        seen_blk3["done"] = True
+    spk.blocks[3].register_forward_hook(hook_block3)
+
+    seen_mfa = {"done": False}
+    def hook_mfa(module, args, output):
+        if seen_mfa["done"]:
+            return
+        out = output[0] if isinstance(output, tuple) else output
+        # output shape : [B=1, 1536, T_frames] channel-first.
+        cc.save_dump(os.path.join(dump_dir, "spk-mfa.bin"), out[0].transpose(0, 1).contiguous())
+        seen_mfa["done"] = True
+    spk.mfa.register_forward_hook(hook_mfa)
+
+    seen_asp = {"done": False}
+    def hook_asp(module, args, output):
+        if seen_asp["done"]:
+            return
+        out = output[0] if isinstance(output, tuple) else output
+        # output shape : [B=1, 3072, 1] from AttentiveStatisticsPooling.
+        # Transpose to [1, 3072] to match the C++ ne=(3072, 1) raw layout.
+        cc.save_dump(os.path.join(dump_dir, "spk-asp.bin"), out[0].transpose(0, 1).contiguous())
+        seen_asp["done"] = True
+    spk.asp.register_forward_hook(hook_asp)
+
+def dump_mel_constants(dump_dir):
+    """Reproduce the speaker encoder mel front end CPU constants the same
+    way the upstream mel_spectrogram() builds them (torch.hann_window for
+    the window and librosa.filters.mel for the Slaney filterbank), and
+    save them under dump_dir/mel-hann.bin and dump_dir/mel-basis.bin so
+    they can be paired with the C++ side dumps."""
+    import librosa
+    n_fft  = 1024
+    n_mels = 128
+    sr     = 24000
+    fmin   = 0.0
+    fmax   = 12000.0
+    hann   = torch.hann_window(n_fft, periodic=True).numpy().astype(np.float32)
+    cc.save_dump(os.path.join(dump_dir, "mel-hann.bin"), hann)
+    mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=n_mels, fmin=fmin, fmax=fmax)
+    cc.save_dump(os.path.join(dump_dir, "mel-basis.bin"), mel_basis.astype(np.float32))
+
+def dump_mel_mag_python(ref_wav, dump_dir):
+    """Reproduce the upstream mel_spectrogram STFT path (same n_fft / hop /
+    window / pad as modeling_qwen3_tts.mel_spectrogram) and dump the post
+    magnitude tensor [T_frames, n_freq] for direct pairing with the C++
+    spk.mag_dump output. This isolates the STFT step from the mel filter."""
+    n_fft   = 1024
+    hop     = 256
+    win     = 1024
+    padding = (n_fft - hop) // 2
+    y       = torch.from_numpy(ref_wav).unsqueeze(0)
+    y       = torch.nn.functional.pad(y.unsqueeze(1), (padding, padding), mode="reflect").squeeze(1)
+    spec    = torch.stft(
+        y, n_fft, hop_length=hop, win_length=win,
+        window=torch.hann_window(win, periodic=True),
+        center=False, pad_mode="reflect", normalized=False,
+        onesided=True, return_complex=True,
+    )
+    mag = torch.sqrt(torch.view_as_real(spec).pow(2).sum(-1) + 1e-9)
+    # mag shape : [B=1, n_freq=513, T_frames]. Transpose to [T_frames, n_freq].
+    cc.save_dump(os.path.join(dump_dir, "mel-mag.bin"), mag[0].transpose(0, 1).contiguous())
 
 def main():
     ap = argparse.ArgumentParser()
@@ -69,6 +229,11 @@ def main():
     cc.ensure_dir(DUMP_PT)
     cc.ensure_dir(DUMP_CPP)
     os.makedirs(os.path.dirname(args.out_pt) or ".", exist_ok=True)
+
+    # Reproduce the upstream mel front end CPU constants (torch.hann_window
+    # + librosa.filters.mel) and dump them so they pair with the C++ side
+    # dumps emitted by speaker-encoder-extract.h.
+    dump_mel_constants(DUMP_PT)
 
     with open(args.prompt, "r", encoding="utf-8") as f:
         text = f.read().strip()
@@ -96,6 +261,11 @@ def main():
     ).eval()
     processor = cc.AutoProcessor.from_pretrained(CKPT, fix_mistral_regex=True)
 
+    # Install codec encoder + ECAPA front end hooks before any encode call,
+    # so the freshly captured intermediates land in DUMP_PT/*.bin alongside
+    # the talker stages installed further down by cc.install_hooks.
+    install_clone_hooks(model, DUMP_PT)
+
     # Load reference WAV. Resample to 24 kHz if needed since both the speaker
     # encoder and the codec tokenizer expect 24 kHz mono input.
     ref_wav, ref_sr = sf.read(args.ref_audio, always_2d=False)
@@ -108,6 +278,12 @@ def main():
         ref_sr = target_sr
     print(f"[Python] RefWav: {ref_wav.shape[0]} samples {ref_sr} Hz {ref_wav.shape[0]/ref_sr:.2f}s")
 
+    # Reproduce the upstream STFT magnitude on the same ref_wav so the
+    # mel-mag.bin pair scopes whether the divergence sits in the STFT or
+    # in the mel filter. This runs before the model speaker_encoder hook
+    # fires so both intermediates land in DUMP_PT before the test compare.
+    dump_mel_mag_python(ref_wav, DUMP_PT)
+
     # Extract speaker embedding via ECAPA forward, projected to talker hidden.
     spk_emb = model.extract_speaker_embedding(audio=ref_wav, sr=ref_sr)
     print(f"[Python] SpeakerEmb shape: {tuple(spk_emb.shape)} dtype: {spk_emb.dtype}")
@@ -116,8 +292,14 @@ def main():
     # Encode the reference audio to 16 codebook codes at 12.5 Hz. The encode
     # call returns shape [T_codec, K=16] after the internal transpose, while
     # the C++ side dumps [K=16, T_codec] row major. We transpose here for a
-    # straight exact match comparison.
-    enc         = model.speech_tokenizer.encode([ref_wav], sr=int(ref_sr))
+    # straight exact match comparison. The C++ side aligns the number of
+    # samples to a multiple of the codec hop length (1920) before feeding
+    # the tokenizer, so we apply the same truncation upstream to keep T_codec
+    # comparable across the codec encoder bisection stages.
+    HOP         = 1920
+    aligned_T   = (ref_wav.shape[0] // HOP) * HOP
+    ref_wav_aln = ref_wav[:aligned_T]
+    enc         = model.speech_tokenizer.encode([ref_wav_aln], sr=int(ref_sr))
     ref_code_pt = enc.audio_codes[0]
     ref_code_kt = ref_code_pt.transpose(0, 1).contiguous()
     print(f"[Python] RefCodes shape: {tuple(ref_code_kt.shape)} (K, T_codec)")

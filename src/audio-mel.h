@@ -157,6 +157,9 @@ static void audio_mel_compute_constants(const AudioMelConfig & cfg, AudioMelCons
 //   dft_real     [n_fft, n_freq]           f32, host constant
 //   dft_imag     [n_fft, n_freq]           f32, host constant
 //   mel_basis    [n_freq, n_mels]          f32, host constant
+//   mag_out      optional pointer that receives the post-STFT magnitude
+//                tensor [n_freq, T_frames] for debug bisection. NULL by
+//                default. Caller marks it as graph output if needed.
 //
 // Output : [n_mels, T_frames] f32 log mel.
 //
@@ -169,7 +172,8 @@ static struct ggml_tensor * audio_mel_build_graph(struct ggml_context *  ctx,
                                                   struct ggml_tensor *   dft_real,
                                                   struct ggml_tensor *   dft_imag,
                                                   struct ggml_tensor *   mel_basis,
-                                                  const AudioMelConfig & cfg) {
+                                                  const AudioMelConfig & cfg,
+                                                  struct ggml_tensor **  mag_out = NULL) {
     const int n_fft = cfg.n_fft;
     const int hop   = cfg.hop;
 
@@ -208,6 +212,9 @@ static struct ggml_tensor * audio_mel_build_graph(struct ggml_context *  ctx,
     struct ggml_tensor * mag2 = ggml_add(ctx, ggml_sqr(ctx, spec_re), ggml_sqr(ctx, spec_im));
     mag2                      = ggml_scale_bias(ctx, mag2, 1.0f, 1e-9f);
     struct ggml_tensor * mag  = ggml_sqrt(ctx, mag2);
+    if (mag_out) {
+        *mag_out = mag;
+    }
 
     // mel_basis [n_freq, n_mels] @ mag [n_freq, T_frames] -> [n_mels, T_frames].
     struct ggml_tensor * mel = ggml_mul_mat(ctx, mel_basis, mag);
