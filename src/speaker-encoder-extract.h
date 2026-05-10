@@ -118,21 +118,20 @@ static bool speaker_encoder_extract(const SpeakerEncoderWeights * sw,
     ggml_set_input(dft_im_in);
     ggml_set_input(mel_b_in);
 
-    struct ggml_tensor * mel_t        = NULL;
-    struct ggml_tensor * mel_dump     = NULL;
-    struct ggml_tensor * mag_t        = NULL;
-    struct ggml_tensor * mag_dump     = NULL;
-    struct ggml_tensor * front_t      = NULL;
-    struct ggml_tensor * front_dump   = NULL;
-    struct ggml_tensor * blk3_t       = NULL;
-    struct ggml_tensor * blk3_dump    = NULL;
-    struct ggml_tensor * mfa_t        = NULL;
-    struct ggml_tensor * mfa_dump     = NULL;
-    struct ggml_tensor * asp_t        = NULL;
-    struct ggml_tensor * asp_dump     = NULL;
-    struct ggml_tensor * emb =
-        speaker_encoder_forward(gctx, sw, audio_in, hann_in, dft_re_in, dft_im_in, mel_b_in, mel_cfg,
-                                &mel_t, &mag_t, &front_t, &blk3_t, &mfa_t, &asp_t);
+    struct ggml_tensor * mel_t      = NULL;
+    struct ggml_tensor * mel_dump   = NULL;
+    struct ggml_tensor * mag_t      = NULL;
+    struct ggml_tensor * mag_dump   = NULL;
+    struct ggml_tensor * front_t    = NULL;
+    struct ggml_tensor * front_dump = NULL;
+    struct ggml_tensor * blk3_t     = NULL;
+    struct ggml_tensor * blk3_dump  = NULL;
+    struct ggml_tensor * mfa_t      = NULL;
+    struct ggml_tensor * mfa_dump   = NULL;
+    struct ggml_tensor * asp_t      = NULL;
+    struct ggml_tensor * asp_dump   = NULL;
+    struct ggml_tensor * emb = speaker_encoder_forward(gctx, sw, audio_in, hann_in, dft_re_in, dft_im_in, mel_b_in,
+                                                       mel_cfg, &mel_t, &mag_t, &front_t, &blk3_t, &mfa_t, &asp_t);
     ggml_set_output(emb);
     if (dump_dir && mel_t) {
         // mel_t has ggml ne=(n_mels, T_frames), which streams row-major

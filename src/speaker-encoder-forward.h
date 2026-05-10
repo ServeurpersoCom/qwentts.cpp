@@ -57,9 +57,9 @@ static struct ggml_tensor * spk_conv1d_same(struct ggml_context * ctx,
     // axis is ne[1], so we transpose to bring T to ne[0], pad, and keep
     // it that way : the im2col downstream expects ne[0]=T_pad, ne[1]=IC,
     // which is exactly the layout we end up with here.
-    struct ggml_tensor * x_t = ggml_cont(ctx, ggml_transpose(ctx, x));    // ne=(T, IC)
+    struct ggml_tensor * x_t = ggml_cont(ctx, ggml_transpose(ctx, x));  // ne=(T, IC)
     if (pad > 0) {
-        x_t = ggml_pad_reflect_1d(ctx, x_t, pad, pad);                    // ne=(T+2*pad, IC)
+        x_t = ggml_pad_reflect_1d(ctx, x_t, pad, pad);                  // ne=(T+2*pad, IC)
     }
 
     // Reshape to 4D for ggml_im2col 1D : ne=(T_pad, IC, 1, 1).
@@ -301,7 +301,8 @@ static struct ggml_tensor * speaker_encoder_forward(struct ggml_context *       
                                                     struct ggml_tensor **         mfa_out      = NULL,
                                                     struct ggml_tensor **         asp_out      = NULL) {
     // Mel : [n_mels=128, T_frames]
-    struct ggml_tensor * mel = audio_mel_build_graph(ctx, audio_padded, hann, dft_real, dft_imag, mel_basis, mel_cfg, mag_out);
+    struct ggml_tensor * mel =
+        audio_mel_build_graph(ctx, audio_padded, hann, dft_real, dft_imag, mel_basis, mel_cfg, mag_out);
     if (mel_out) {
         *mel_out = mel;
     }

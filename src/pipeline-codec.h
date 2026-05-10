@@ -95,8 +95,10 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
 //              codec-pre-fsq.bin under that directory. Quiet otherwise.
 // Returns codes flat as [K, T] row-major, K = QWEN_TOKENIZER_NUM_CODEBOOKS,
 // T = n_samples / 1920. Empty on failure.
-std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc, const float * audio, int n_samples,
-                                           const char * dump_dir = NULL);
+std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
+                                           const float *   audio,
+                                           int             n_samples,
+                                           const char *    dump_dir = NULL);
 
 // Free every backend buffer and ggml context. Safe to call on a zeroed struct.
 void pipeline_codec_free(PipelineCodec * pc);

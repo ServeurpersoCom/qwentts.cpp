@@ -214,8 +214,8 @@ static struct ggml_tensor * qwen_seanet_encoder_forward(struct ggml_context *   
         if (i == 0 && resnet0_out) {
             *resnet0_out = x;
         }
-        x                           = ggml_elu(ctx, x);
-        x                           = qwen_causal_conv1d(ctx, stg.down_w, stg.down_b, x, 2 * stg.ratio, 1, stg.ratio);
+        x = ggml_elu(ctx, x);
+        x = qwen_causal_conv1d(ctx, stg.down_w, stg.down_b, x, 2 * stg.ratio, 1, stg.ratio);
         if (i == 0 && stage0_out) {
             *stage0_out = x;
         }
