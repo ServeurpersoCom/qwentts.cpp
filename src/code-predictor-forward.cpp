@@ -87,18 +87,16 @@ static struct ggml_tensor * code_predictor_layer_forward(struct ggml_context *  
     struct ggml_tensor * k_full = ggml_view_3d(ctx, k_cache, hd, T_full, n_kv, k_cache->nb[1], k_cache->nb[2], 0);
     struct ggml_tensor * v_full = ggml_view_3d(ctx, v_cache, hd, T_full, n_kv, v_cache->nb[1], v_cache->nb[2], 0);
 
-    struct ggml_tensor * q_p = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
-    struct ggml_tensor * v_p = ggml_cont(ctx, ggml_permute(ctx, v_full, 1, 0, 2, 3));
+    // Q permute [hd, n_q_heads, T] -> [hd, T, n_q_heads] for flash_attn_ext.
+    struct ggml_tensor * q_p = ggml_permute(ctx, q, 0, 2, 1, 3);
 
-    struct ggml_tensor * scores = ggml_mul_mat(ctx, k_full, q_p);
-    ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+    // Fused flash attention. Matches the working acestep qw3lm_build_attn
+    // pattern, fixes the Vulkan autoregressive decode bug.
+    float                scale = 1.0f / sqrtf((float) hd);
+    struct ggml_tensor * attn  = ggml_flash_attn_ext(ctx, q_p, k_full, v_full, mask, scale, 0.0f, 0.0f);
+    ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
 
-    float scale = 1.0f / sqrtf((float) hd);
-    scores      = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f);
-
-    struct ggml_tensor * attn = ggml_mul_mat(ctx, v_p, scores);
-    attn                      = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3));
-    attn                      = ggml_reshape_2d(ctx, attn, n_q_heads * hd, T);
+    attn = ggml_reshape_2d(ctx, attn, n_q_heads * hd, T);
 
     struct ggml_tensor * o = ggml_mul_mat(ctx, layer.attn.o_proj_w, attn);
     x                      = ggml_add(ctx, x, o);
@@ -146,7 +144,7 @@ static bool code_predictor_run(const CodePredictorWeights * cw,
     // Inputs : fresh embeddings (talker_hidden), positions, attention mask
     struct ggml_tensor * x_in    = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, talker_hidden, T);
     struct ggml_tensor * pos_in  = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, T);
-    struct ggml_tensor * mask_in = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, T_full, T);
+    struct ggml_tensor * mask_in = ggml_new_tensor_2d(gctx, GGML_TYPE_F16, T_full, T);
     ggml_set_name(x_in, "sub_input");
     ggml_set_name(pos_in, "positions");
     ggml_set_name(mask_in, "causal_mask");
@@ -195,14 +193,19 @@ static bool code_predictor_run(const CodePredictorWeights * cw,
     }
 
     {
-        std::vector<float> mask((size_t) T * (size_t) T_full, -INFINITY);
+        std::vector<ggml_fp16_t> mask((size_t) T * (size_t) T_full);
+        const ggml_fp16_t        zero    = ggml_fp32_to_fp16(0.0f);
+        const ggml_fp16_t        neg_inf = ggml_fp32_to_fp16(-INFINITY);
+        for (size_t i = 0; i < mask.size(); i++) {
+            mask[i] = neg_inf;
+        }
         for (int q = 0; q < T; q++) {
             const int q_pos = n_past + q;
             for (int k = 0; k <= q_pos; k++) {
-                mask[(size_t) q * (size_t) T_full + (size_t) k] = 0.0f;
+                mask[(size_t) q * (size_t) T_full + (size_t) k] = zero;
             }
         }
-        ggml_backend_tensor_set(mask_in, mask.data(), 0, mask.size() * sizeof(float));
+        ggml_backend_tensor_set(mask_in, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
     }
 
     if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS) {

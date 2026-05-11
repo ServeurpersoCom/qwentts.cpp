@@ -107,27 +107,31 @@ static struct ggml_tensor * talker_layer_forward(struct ggml_context * ctx,
     ggml_build_forward_expand(gf, v_cpy);
 
     // Read the [0, n_past + T) window for attention. The cache slice is
-    // already in the [hd, T_full, n_kv] layout we want, so K_p = view.
+    // already in the [hd, T_full, n_kv] layout flash_attn_ext expects for
+    // K and V (n_embd, n_kv, n_head_kv, ne3), passed directly as views.
     const int            T_full = n_past + T;
     struct ggml_tensor * k_full = ggml_view_3d(ctx, k_cache, hd, T_full, n_kv, k_cache->nb[1], k_cache->nb[2], 0);
     struct ggml_tensor * v_full = ggml_view_3d(ctx, v_cache, hd, T_full, n_kv, v_cache->nb[1], v_cache->nb[2], 0);
 
-    // Attention layout : [hd, T_full, n_kv] for K, [hd, T, n_q_heads] for Q,
-    // [T_full, n_kv, hd] for V. ggml_mul_mat broadcasts on dims 2/3 when
-    // source has fewer heads than destination, which is exactly the GQA
-    // case with n_q_heads = n_kv * n_rep, no explicit repeat_kv needed.
-    struct ggml_tensor * q_p = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
-    struct ggml_tensor * v_p = ggml_cont(ctx, ggml_permute(ctx, v_full, 1, 0, 2, 3));  // [T_full, hd, n_kv]
+    // Q permute [hd, n_q_heads, T] -> [hd, T, n_q_heads]. flash_attn_ext
+    // expects ne[1] = n_batch and ne[2] = n_head ; the GQA broadcast
+    // check ggml_can_mul_mat is n_head % n_head_kv == 0, matching K layout.
+    // No cont : flash_attn_ext takes the view directly, like acestep does.
+    struct ggml_tensor * q_p = ggml_permute(ctx, q, 0, 2, 1, 3);
 
-    struct ggml_tensor * scores = ggml_mul_mat(ctx, k_full, q_p);
-    ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+    // Fused flash attention. The manual mul_mat + soft_max_ext + mul_mat
+    // path it replaces had a Vulkan bug in autoregressive decode (T=1)
+    // where the KV cache view stride on dim 2 (= max_T * hd, non
+    // contiguous with dim 1 of length T_full) caused the second mul_mat
+    // to diverge silently. Flash attention has a backend-tested kernel
+    // on every target (CPU, CUDA, Vulkan), matches the working acestep
+    // qw3lm_build_attn pattern.
+    float                scale = 1.0f / sqrtf((float) hd);
+    struct ggml_tensor * attn  = ggml_flash_attn_ext(ctx, q_p, k_full, v_full, mask, scale, 0.0f, 0.0f);
+    ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
 
-    float scale = 1.0f / sqrtf((float) hd);
-    scores      = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f);
-
-    struct ggml_tensor * attn = ggml_mul_mat(ctx, v_p, scores);
-    attn                      = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3));
-    attn                      = ggml_reshape_2d(ctx, attn, n_q_heads * hd, T);
+    // Flash attention output is [hd, n_q_heads, T], flatten heads for o_proj.
+    attn = ggml_reshape_2d(ctx, attn, n_q_heads * hd, T);
 
     struct ggml_tensor * o = ggml_mul_mat(ctx, layer.attn.o_proj_w, attn);
 
@@ -188,7 +192,7 @@ static bool talker_forward_core(const TalkerWeights * tw,
     // single row of zeros of length T_full.
     struct ggml_tensor * x_in    = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, hidden, T);
     struct ggml_tensor * pos_in  = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, T);
-    struct ggml_tensor * mask_in = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, T_full, T);
+    struct ggml_tensor * mask_in = ggml_new_tensor_2d(gctx, GGML_TYPE_F16, T_full, T);
     ggml_set_name(x_in, "input_embed");
     ggml_set_name(pos_in, "positions");
     ggml_set_name(mask_in, "causal_mask");
@@ -255,16 +259,22 @@ static bool talker_forward_core(const TalkerWeights * tw,
     }
 
     // Causal mask : 0 where k <= n_past + q, -inf otherwise. Stored
-    // row-major [T_q, T_k] with T_k as the fast axis (ne[0]).
+    // row-major [T_q, T_k] with T_k as the fast axis (ne[0]). F16 dtype
+    // matches ggml_flash_attn_ext convention used by the attention path.
     {
-        std::vector<float> mask((size_t) T * (size_t) T_full, -INFINITY);
+        std::vector<ggml_fp16_t> mask((size_t) T * (size_t) T_full);
+        const ggml_fp16_t        zero    = ggml_fp32_to_fp16(0.0f);
+        const ggml_fp16_t        neg_inf = ggml_fp32_to_fp16(-INFINITY);
+        for (size_t i = 0; i < mask.size(); i++) {
+            mask[i] = neg_inf;
+        }
         for (int q = 0; q < T; q++) {
             const int q_pos = n_past + q;
             for (int k = 0; k <= q_pos; k++) {
-                mask[(size_t) q * (size_t) T_full + (size_t) k] = 0.0f;
+                mask[(size_t) q * (size_t) T_full + (size_t) k] = zero;
             }
         }
-        ggml_backend_tensor_set(mask_in, mask.data(), 0, mask.size() * sizeof(float));
+        ggml_backend_tensor_set(mask_in, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
     }
 
     if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS) {
