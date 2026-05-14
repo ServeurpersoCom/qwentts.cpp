@@ -102,9 +102,6 @@ add_library(qwen-core STATIC
     src/qwen.cpp
     src/pipeline-tts.cpp
     src/pipeline-codec.cpp
-    src/prompt-builder.cpp
-    src/talker-forward.cpp
-    src/code-predictor-forward.cpp
 )
 target_compile_definitions(qwen-core PUBLIC QWENTTS_STATIC)
 target_include_directories(qwen-core PUBLIC src)
@@ -122,9 +119,6 @@ if(QWENTTS_SHARED)
         src/qwen.cpp
         src/pipeline-tts.cpp
         src/pipeline-codec.cpp
-        src/prompt-builder.cpp
-        src/talker-forward.cpp
-        src/code-predictor-forward.cpp
     )
     target_compile_definitions(qwen PRIVATE QWENTTS_BUILD)
     set_target_properties(qwen PROPERTIES
