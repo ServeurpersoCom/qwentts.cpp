@@ -16,7 +16,16 @@
 #define MINIAUDIO_IMPLEMENTATION
 #define MA_ENABLE_DECODER_WRAPPERS 0
 #define MA_ENABLE_RESOURCE_MANAGER 0
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wconversion"
+#pragma GCC diagnostic ignored "-Wsign-conversion"
+#endif
 #include "../vendor/miniaudio/miniaudio.h"
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 #include "../vendor/cpp-httplib/httplib.h"
 #include "../vendor/nlohmann/json.hpp"
