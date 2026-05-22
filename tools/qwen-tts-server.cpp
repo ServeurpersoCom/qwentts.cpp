@@ -299,6 +299,13 @@ static void handle_speech(
         params.ref_text = config.default_ref_transcript.empty() ? nullptr : config.default_ref_transcript.c_str();
     }
 
+    // Log request
+    auto t0 = std::chrono::steady_clock::now();
+    std::string input_preview = body["input"].get<std::string>();
+    if (input_preview.size() > 80) input_preview = input_preview.substr(0, 80) + "...";
+    fprintf(stderr, "[REQ] text=%d chars format=%s voice=%s\n",
+            (int)body["input"].get<std::string>().size(), format.c_str(), voice.empty() ? "(default)" : voice.c_str());
+
     // Synthesize
     struct qt_audio audio = {};
     audio.samples = nullptr;
@@ -307,8 +314,12 @@ static void handle_speech(
     audio.channels = 0;
 
     enum qt_status status = qt_synthesize(model.ctx, &params, &audio);
+    auto t1 = std::chrono::steady_clock::now();
+    double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
     if (status != QT_STATUS_OK) {
         std::string err = qt_last_error() ? qt_last_error() : "Synthesis failed";
+        fprintf(stderr, "[ERR] %s (%.0fms)\n", err.c_str(), elapsed_ms);
         res.status = 500;
         res.set_content(make_error(err, "server_error").dump(), "application/json");
         return;
@@ -320,10 +331,14 @@ static void handle_speech(
     qt_audio_free(&audio);
 
     if (encoded.empty()) {
+        fprintf(stderr, "[ERR] %s (%.0fms)\n", err_msg.c_str(), elapsed_ms);
         res.status = 500;
         res.set_content(make_error(err_msg, "server_error").dump(), "application/json");
         return;
     }
+
+    fprintf(stderr, "[OK] %d samples %.0fms %.1fkB %s\n",
+            audio.n_samples, elapsed_ms, (double)encoded.size() / 1024, format.c_str());
 
     // Set content type
     std::string content_type;
