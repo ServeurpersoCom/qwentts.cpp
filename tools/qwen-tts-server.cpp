@@ -277,7 +277,15 @@ static void handle_speech(
     // Build tts params
     struct qt_tts_params params;
     qt_tts_default_params(&params);
-    params.text = body["input"].get<std::string>().c_str();
+
+    // Keep strings alive for the duration of qt_synthesize (params holds raw pointers)
+    std::string input_text = body["input"].get<std::string>();
+    params.text = input_text.c_str();
+
+    // lang: qwentts pipeline passes null lang to prompt_builder_build which
+    // expects std::string& — construction from null throws. Use empty string.
+    static const char lang_auto[] = "auto";
+    params.lang = lang_auto;
 
     // Voice → speaker (for custom_voice) or instruct (for voice_design)
     if (!voice.empty()) {
