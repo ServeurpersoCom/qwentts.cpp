@@ -28,6 +28,36 @@
 #include <vector>
 
 /* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+// If *arg* names a readable file, return its contents (trailing newline
+// stripped).  Otherwise return *arg* verbatim so the caller can treat it
+// as literal text.
+static std::string resolve_text_or_file(const std::string & arg) {
+    if (arg.empty()) return arg;
+    if (access(arg.c_str(), R_OK) == 0) {
+        std::FILE * f = std::fopen(arg.c_str(), "r");
+        if (f) {
+            std::string content;
+            char buf[4096];
+            size_t n;
+            while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+                content.append(buf, n);
+            }
+            std::fclose(f);
+            // Strip a single trailing newline (convenience)
+            if (!content.empty() && content.back() == '\n') {
+                content.pop_back();
+            }
+            fprintf(stderr, "[INFO] Loaded ref-transcript from file: %s (%zu chars)\n", arg.c_str(), content.size());
+            return content;
+        }
+    }
+    return arg;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Signal handling                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -540,7 +570,7 @@ static void print_usage(const char * prog) {
             "  --speaker <name>        Default speaker name (custom_voice)\n"
             "  --instruct <text>       Default voice instruction (voice_design)\n"
             "  --ref-audio <file>      Reference audio for voice cloning (base mode)\n"
-            "  --ref-transcript <text> Transcript of reference audio\n\n"
+            "  --ref-transcript <text|file>  Transcript of ref audio (string or file path)\n\n"
             "Inference:\n"
             "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n",
@@ -570,7 +600,7 @@ int main(int argc, char ** argv)
         } else if (strcmp(argv[i], "--ref-audio") == 0 && i + 1 < argc) {
             config.default_ref_audio = argv[++i];
         } else if (strcmp(argv[i], "--ref-transcript") == 0 && i + 1 < argc) {
-            config.default_ref_transcript = argv[++i];
+            config.default_ref_transcript = resolve_text_or_file(argv[++i]);
         } else if (strcmp(argv[i], "--no-fa") == 0) {
             config.use_fa = false;
         } else if (strcmp(argv[i], "--clamp-fp16") == 0) {
