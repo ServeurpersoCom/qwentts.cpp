@@ -297,7 +297,12 @@ static void handle_speech(
     if (!ref_audio.empty()) {
         params.ref_audio_24k = ref_audio.data();
         params.ref_n_samples = (int)ref_audio.size();
-        params.ref_text = config.default_ref_transcript.empty() ? nullptr : config.default_ref_transcript.c_str();
+        if (!config.default_ref_transcript.empty()) {
+            params.ref_text = config.default_ref_transcript.c_str();
+        }
+        // ref_text left as default (nullptr OK when ref_audio not set,
+        // but when ref_audio IS set, qwentts needs it — omit it and let
+        // qt_tts_default_params keep the safe default)
     }
 
     // Log request
