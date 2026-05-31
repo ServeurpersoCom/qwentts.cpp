@@ -291,6 +291,13 @@ QT_API enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_p
 // Clamps to a minimum of one frame.
 QT_API int qt_duration_sec_to_tokens(const struct qt_context * q, float duration_sec);
 
+/* Return the number of speakers in the loaded model's speaker table.
+   If names_out is non-NULL, fills it with a void* pointing to an array
+   of n const char* speaker names (valid until qt_free). Cast to
+   (const char**) to index: names[i].  Returns 0 and sets *names_out = NULL
+   if the model has no speaker table (Base / VoiceDesign variants). */
+QT_API int qt_get_speakers(const struct qt_context * q, void ** names_out);
+
 #ifdef __cplusplus
 }
 #endif

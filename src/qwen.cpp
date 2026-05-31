@@ -39,6 +39,9 @@ struct qt_context {
     BackendPair  bp;
     PipelineTTS  pt;
     BPETokenizer tok;
+    // Cached speaker-name array for qt_get_speakers. Lazily allocated,
+    // freed in qt_free alongside everything else.
+    void * speaker_names_cache = NULL;
 };
 
 // Thread-local backing store for qt_last_error(). std::string sized once
@@ -283,6 +286,7 @@ void qt_free(struct qt_context * q) {
     if (!q) {
         return;
     }
+    free((void *) q->speaker_names_cache);
     pipeline_tts_free(&q->pt);
     backend_release(q->bp.backend, q->bp.cpu_backend);
     delete q;
@@ -395,6 +399,40 @@ int qt_duration_sec_to_tokens(const struct qt_context * q, float duration_sec) {
         return 1;
     }
     return pipeline_tts_duration_sec_to_tokens(&q->pt, duration_sec);
+}
+
+int qt_get_speakers(const struct qt_context * q, void ** names_out) {
+    if (names_out) {
+        *names_out = NULL;
+    }
+    if (!q) {
+        qt_set_error("qt_get_speakers: q is NULL");
+        qt_log(QT_LOG_ERROR, "[Qwen] qt_get_speakers requires a valid handle");
+        return 0;
+    }
+    const auto & speakers = q->pt.speakers;
+    if (speakers.empty()) {
+        return 0;
+    }
+
+    // Lazily build a cached array on first call.
+    struct qt_context * ctx = const_cast<struct qt_context *>(q);
+    if (!ctx->speaker_names_cache) {
+        const char ** arr = (const char **) malloc(speakers.size() * sizeof(const char *));
+        if (!arr) {
+            qt_set_error("qt_get_speakers: malloc failed");
+            return 0;
+        }
+        for (size_t i = 0; i < speakers.size(); i++) {
+            arr[i] = speakers[i].name.c_str();
+        }
+        ctx->speaker_names_cache = (void *) arr;
+    }
+
+    if (names_out) {
+        *names_out = ctx->speaker_names_cache;
+    }
+    return (int) speakers.size();
 }
 
 }  // extern "C"

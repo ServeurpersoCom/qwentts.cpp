@@ -176,3 +176,38 @@ target_include_directories(test-abi-c PRIVATE
 )
 target_link_libraries(test-abi-c PRIVATE qwen-core)
 link_ggml_backends(test-abi-c)
+
+# qwen-tts-server : OpenAI-compatible HTTP server for TTS.
+# Vendored deps: cpp-httplib (HTTP), nlohmann/json (JSON), miniaudio (audio encoding).
+# Supports WAV/FLAC natively; MP3 (LAME) and OGG (libvorbis) are optional.
+add_executable(qwen-tts-server tools/qwen-tts-server.cpp
+    vendor/cpp-httplib/httplib.cpp
+)
+target_link_libraries(qwen-tts-server PRIVATE qwen-core)
+target_include_directories(qwen-tts-server SYSTEM PRIVATE
+    ${CMAKE_SOURCE_DIR}/vendor/cpp-httplib
+    ${CMAKE_SOURCE_DIR}/vendor/nlohmann
+    ${CMAKE_SOURCE_DIR}/vendor/miniaudio
+)
+link_ggml_backends(qwen-tts-server)
+
+# Optional: link LAME for MP3 encoding
+find_library(LAME_LIBRARY NAMES lame)
+if(LAME_LIBRARY)
+    message(STATUS "LAME found — MP3 encoding enabled in server")
+    target_link_libraries(qwen-tts-server PRIVATE ${LAME_LIBRARY})
+    target_compile_definitions(qwen-tts-server PRIVATE MA_ENABLE_MP3)
+else()
+    message(STATUS "LAME not found — MP3 encoding disabled in server")
+endif()
+
+# Optional: link libvorbis for OGG encoding
+find_library(VORBIS_LIBRARY NAMES vorbis vorbis_file)
+find_library(VORBIS_ENC_LIBRARY NAMES vorbisenc)
+if(VORBIS_LIBRARY AND VORBIS_ENC_LIBRARY)
+    message(STATUS "libvorbis found — OGG encoding enabled in server")
+    target_link_libraries(qwen-tts-server PRIVATE ${VORBIS_LIBRARY} ${VORBIS_ENC_LIBRARY})
+    target_compile_definitions(qwen-tts-server PRIVATE MA_ENABLE_VORBIS)
+else()
+    message(STATUS "libvorbis not found — OGG encoding disabled in server")
+endif()
