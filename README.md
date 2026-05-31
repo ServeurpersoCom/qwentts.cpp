@@ -61,14 +61,18 @@ RVQ). Modes are `base`, `customvoice` and `voicedesign` ; sizes are
 
 ## Quick start
 
+Each block is the command run by the matching script in `examples/`.
+
+Default voice (`base.sh`) :
+
 ```
-echo "Hello world." | ./build/qwen-tts \
+./build/qwen-tts \
     --model models/qwen-talker-1.7b-base-Q8_0.gguf \
     --codec models/qwen-tokenizer-12hz-Q8_0.gguf \
-    --lang English -o hello.wav
+    --lang English -o out.wav < prompt.txt
 ```
 
-Voice cloning (Base, reference WAV plus its transcript) :
+Voice cloning (`clone.sh`, Base, reference WAV plus its transcript) :
 
 ```
 ./build/qwen-tts \
@@ -78,7 +82,7 @@ Voice cloning (Base, reference WAV plus its transcript) :
     --lang English -o out.wav < prompt.txt
 ```
 
-Named speaker (CustomVoice) :
+Named speaker (`customvoice.sh`, CustomVoice) :
 
 ```
 ./build/qwen-tts \
@@ -88,7 +92,10 @@ Named speaker (CustomVoice) :
     --lang English -o out.wav < prompt.txt
 ```
 
-Voice design (VoiceDesign, attribute instruction) :
+Speakers : serena, vivian, uncle_fu, ryan, aiden, ono_anna, sohee,
+eric (sichuan dialect), dylan (beijing dialect).
+
+Voice design (`tts.sh`, VoiceDesign, attribute instruction) :
 
 ```
 ./build/qwen-tts \
