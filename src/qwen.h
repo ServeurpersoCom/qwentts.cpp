@@ -262,7 +262,7 @@ struct qt_tts_params {
     // first chunk has its left context collapsed to whatever is
     // available, matching the upstream Qwen3-TTS 12 Hz tokenizer
     // chunked_decode rule. Defaults match the upstream reference :
-    // codec_chunk_sec 24.0 (300 frames at 12.5 Hz) and
+    // codec_chunk_sec 5.0 (62 frames at 12.5 Hz) and
     // codec_left_context_sec 2.0 (25 frames at 12.5 Hz). Values are
     // converted internally to integer frame counts via the codec frame
     // rate ; codec_chunk_sec clamps to >= 1 frame, codec_left_context_sec
@@ -287,7 +287,7 @@ struct qt_tts_params {
 // Initialise to the standard defaults. Strings NULL, seed -1,
 // max_new_tokens 2048, do_sample true, temperature 0.9, top_k 50,
 // top_p 1.0, repetition_penalty 1.05, subtalker mirrors talker,
-// dump_dir NULL, cancel NULL, on_chunk NULL, codec_chunk_sec 24.0,
+// dump_dir NULL, cancel NULL, on_chunk NULL, codec_chunk_sec 5.0,
 // codec_left_context_sec 2.0.
 QT_API void qt_tts_default_params(struct qt_tts_params * p);
 

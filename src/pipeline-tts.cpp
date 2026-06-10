@@ -538,7 +538,7 @@ qt_status pipeline_tts_synthesize(PipelineTTS *                pt,
     // samples are stripped from the head of the decoded chunk. The first
     // chunk has its left context collapsed to whatever is available.
     const bool  streaming       = (params->on_chunk != NULL);
-    const float chunk_sec       = params->codec_chunk_sec > 0.0f ? params->codec_chunk_sec : 24.0f;
+    const float chunk_sec       = params->codec_chunk_sec > 0.0f ? params->codec_chunk_sec : 5.0f;
     const float left_ctx_sec    = params->codec_left_context_sec >= 0.0f ? params->codec_left_context_sec : 2.0f;
     const int   chunk_frames    = pipeline_tts_duration_sec_to_tokens(pt, chunk_sec);
     const int   left_ctx_frames = pipeline_tts_duration_sec_to_tokens(pt, left_ctx_sec);

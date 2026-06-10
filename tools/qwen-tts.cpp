@@ -47,7 +47,7 @@ static void print_usage(const char * prog) {
             "                          --ref-spk and --ref-text, enables ICL clone mode)\n"
             "  --ref-text <path>       Transcript file for the reference (enables ICL clone mode)\n"
             "  --max-new <n>           Max new audio frames (default: 2048)\n"
-            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 24.0)\n"
+            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 5.0)\n"
             "  --codec-left-dur <f>    Codec decode left context duration in seconds (default: 2.0)\n"
             "  --stream-by-line        Flush synthesis at each newline, one WAV header per line (-o '-')\n\n"
             "Sampling:\n"
@@ -184,7 +184,7 @@ static bool parse_args(int argc, char ** argv, Args & a) {
     a.use_fa                 = true;
     a.clamp_fp16             = false;
     a.stream_by_line         = false;
-    a.codec_chunk_sec        = 24.0f;
+    a.codec_chunk_sec        = 5.0f;
     a.codec_left_context_sec = 2.0f;
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
