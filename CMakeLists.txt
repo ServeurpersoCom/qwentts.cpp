@@ -173,6 +173,16 @@ add_executable(tts-server tools/tts-server.cpp)
 target_link_libraries(tts-server PRIVATE qwen-core httplib yyjson)
 link_ggml_backends(tts-server)
 
+# qwentts-serve : llama-server-style HTTP server for the TTS pipeline.
+# Shares the same core, vendored HTTP and JSON libs, and ggml backends.
+add_executable(qwentts-serve
+    tools/qwentts-serve/main.cpp
+    tools/qwentts-serve/server.cpp
+    tools/qwentts-serve/server-http.cpp
+)
+target_link_libraries(qwentts-serve PRIVATE qwen-core httplib yyjson)
+link_ggml_backends(qwentts-serve)
+
 # test-abi-c : pure C99 smoke test that locks in the public ABI contract.
 # Compiles qwen.h with a C compiler under -Wall -Werror -pedantic and
 # links against the static lib. The test never loads a model ; failure

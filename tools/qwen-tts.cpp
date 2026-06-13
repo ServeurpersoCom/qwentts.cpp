@@ -60,10 +60,13 @@ static void print_usage(const char * prog) {
             "  --sub-temp <f>          Sub-talker temperature (default: 0.9)\n"
             "  --sub-top-k <n>         Sub-talker top-k (default: 50)\n"
             "  --sub-top-p <f>         Sub-talker top-p (default: 1.0)\n\n"
-            "Debug:\n"
-            "  --no-fa                 Disable flash attention\n"
-            "  --clamp-fp16            Clamp hidden states to FP16 range\n"
-            "  --dump <dir>            Dump intermediate tensors (f32) to <dir>\n",
+    "Debug:\n"
+             "  --device <name>         Force a specific backend device (default: auto).\n"
+             "                          Use \"cpu\" or \"none\" for CPU only.\n"
+             "  --list-devices          List available devices and exit\n"
+             "  --no-fa                 Disable flash attention\n"
+             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
+             "  --dump <dir>            Dump intermediate tensors (f32) to <dir>\n",
             prog);
 }
 
@@ -91,6 +94,8 @@ struct Args {
     float        subtalker_top_p;
     float        subtalker_temperature;
     bool         subtalker_do_sample;
+    const char * device;
+    bool         list_devices;
     bool         use_fa;
     bool         clamp_fp16;
     bool         stream_by_line;
@@ -181,6 +186,8 @@ static bool parse_args(int argc, char ** argv, Args & a) {
     a.subtalker_top_k        = 50;
     a.subtalker_top_p        = 1.0f;
     a.subtalker_temperature  = 0.9f;
+    a.device                 = nullptr;
+    a.list_devices           = false;
     a.use_fa                 = true;
     a.clamp_fp16             = false;
     a.stream_by_line         = false;
@@ -243,6 +250,10 @@ static bool parse_args(int argc, char ** argv, Args & a) {
             a.use_fa = false;
         } else if (std::strcmp(arg, "--clamp-fp16") == 0) {
             a.clamp_fp16 = true;
+        } else if (std::strcmp(arg, "--device") == 0 && i + 1 < argc) {
+            a.device = argv[++i];
+        } else if (std::strcmp(arg, "--list-devices") == 0) {
+            a.list_devices = true;
         } else if (std::strcmp(arg, "--stream-by-line") == 0) {
             a.stream_by_line = true;
         } else if (std::strcmp(arg, "--codec-chunk-dur") == 0 && i + 1 < argc) {
@@ -256,7 +267,7 @@ static bool parse_args(int argc, char ** argv, Args & a) {
             return false;
         }
     }
-    return a.model && a.codec;
+    return a.list_devices || (a.model && a.codec);
 }
 
 static int run(const Args & a) {
@@ -268,6 +279,7 @@ static int run(const Args & a) {
     qt_init_default_params(&iparams);
     iparams.talker_path = a.model;
     iparams.codec_path  = a.codec;
+    iparams.device      = a.device;
     iparams.use_fa      = a.use_fa;
     iparams.clamp_fp16  = a.clamp_fp16;
 
@@ -520,6 +532,10 @@ int main(int argc, char ** argv) {
     if (!parse_args(argc, argv, a)) {
         print_usage(argv[0]);
         return 1;
+    }
+    if (a.list_devices) {
+        qt_list_devices(stderr);
+        return 0;
     }
     // The facade absorbs every std::exception thrown deep in the load
     // and synthesis chains, converting them into qt_status + a

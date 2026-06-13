@@ -183,12 +183,22 @@ void qt_log_set(qt_log_cb cb, void * user_data) {
     g_log_cb.store(cb, std::memory_order_release);
 }
 
+void qt_list_devices(FILE * out) {
+    ggml_backend_load_all();
+    int n = (int) ggml_backend_dev_count();
+    fprintf(out, "Available devices (%d):\n", n);
+    for (int i = 0; i < n; i++) {
+        fprintf(out, "  %s\n", ggml_backend_dev_name(ggml_backend_dev_get(i)));
+    }
+}
+
 void qt_init_default_params(struct qt_init_params * p) {
     p->abi_version = QT_ABI_VERSION;
     p->talker_path = nullptr;
     p->codec_path  = nullptr;
     p->use_fa      = true;
     p->clamp_fp16  = false;
+    p->device      = nullptr;
 }
 
 void qt_tts_default_params(struct qt_tts_params * p) {
@@ -259,7 +269,7 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
     // qt_free, which is idempotent on partial state (NULL-safe sched,
     // NULL GGUF handles, refcount-correct backend release).
     try {
-        q->bp = backend_init("Talker");
+        q->bp = backend_init("Talker", params->device);
         if (!q->bp.backend) {
             qt_throw("qt_init: backend_init failed (no GGML backend available)");
         }

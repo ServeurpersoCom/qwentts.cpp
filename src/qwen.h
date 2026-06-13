@@ -18,6 +18,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -115,17 +116,25 @@ struct qt_context;
 // F32 manual chain); clamp_fp16 inserts ggml_clamp(-65504, 65504) on V
 // before attention and on the residual stream between blocks to guard
 // FP16 matmul accumulation on sub Ampere CUDA targets.
+// device selects the GGML backend: NULL = auto (try GGML_BACKEND env
+// var then pick best GPU), or a device name ("cuda0", "vulkan", "cpu").
 struct qt_init_params {
     int          abi_version;
     const char * talker_path;
     const char * codec_path;
     bool         use_fa;
     bool         clamp_fp16;
+    const char * device;  // NULL = auto, or device name like "cuda0"
 };
 
 // Initialise to the standard defaults: both paths NULL (caller must set
-// them before calling qt_init), use_fa true, clamp_fp16 false.
+// them before calling qt_init), use_fa true, clamp_fp16 false, device NULL.
 QT_API void qt_init_default_params(struct qt_init_params * p);
+
+// Print available GGML backend devices to `out`. Useful for discovering
+// device names to pass via qt_init_params.device. Safe to call any time
+// (backends are loaded lazily). Prints one device name per line.
+QT_API void qt_list_devices(FILE * out);
 
 // Allocate every module described by params. Returns NULL on any
 // failure after releasing whatever it has allocated so far. The

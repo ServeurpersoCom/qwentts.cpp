@@ -63,10 +63,12 @@ static ggml_backend_t cpu_backend_new(int n_threads) {
 // Initialize backends: load all available (CUDA, Metal, Vulkan...),
 // pick the best one, keep CPU as fallback.
 // label: log prefix, e.g. "DiT", "VAE", "LM"
+// device: explicit device name ("cuda0", "vulkan", "cpu", ...) or
+//         nullptr to try GGML_BACKEND env var then auto-best.
 // Subsequent calls reuse the same backend (single VMM pool). Returns a
 // BackendPair with .backend == NULL when initialisation fails; the caller
 // must check this before passing it to any pipeline_*_load.
-static BackendPair backend_init(const char * label) {
+static BackendPair backend_init(const char * label, const char * device = nullptr) {
     if (g_backend_refs > 0) {
         g_backend_refs++;
         qt_log(QT_LOG_INFO, "[Load] %s backend: %s (shared)", label, ggml_backend_name(g_backend_cache.backend));
@@ -76,9 +78,25 @@ static BackendPair backend_init(const char * label) {
     ggml_backend_load_all();
     BackendPair bp = {};
 
-    // GGML_BACKEND env var: force a specific device instead of auto-best.
+    // "none" or "cpu" forces CPU-only mode (no GPU init attempt).
+    const char * force_backend = device ? device : std::getenv("GGML_BACKEND");
+    if (force_backend && (strcmp(force_backend, "none") == 0 || strcmp(force_backend, "cpu") == 0)) {
+        int  n_threads = backend_cpu_n_threads();
+        bp.backend     = cpu_backend_new(n_threads);
+        bp.cpu_backend = bp.backend;
+        if (!bp.backend) {
+            qt_log(QT_LOG_ERROR, "[Load] failed to init CPU backend");
+            return BackendPair{};
+        }
+        bp.has_gpu = false;
+        qt_log(QT_LOG_INFO, "[Load] %s backend: CPU (threads: %d)", label, n_threads);
+        g_backend_cache = bp;
+        g_backend_refs  = 1;
+        return bp;
+    }
+
+    // Explicit device name takes precedence over GGML_BACKEND env var.
     // Device names: CUDA0, Vulkan0, CPU, BLAS (see ggml_backend_dev_name).
-    const char * force_backend = std::getenv("GGML_BACKEND");
     if (force_backend) {
         bp.backend = ggml_backend_init_by_name(force_backend, nullptr);
         if (!bp.backend) {
