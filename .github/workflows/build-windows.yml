@@ -27,7 +27,7 @@ jobs:
           - os: windows-2025
             vs-version: "18"
             # 若 13.3.0 尚未被该 Action 收录，请将其改为 "13.2.0"
-            cuda-version: "13.2.0" 
+            cuda-version: "13.3.0" 
 
     steps:
       - name: Checkout repository
@@ -51,14 +51,32 @@ jobs:
           # 矩阵构建必须指定日志后缀以防止文件覆盖
           log-file-suffix: 'vc${{ matrix.vs-version }}-cuda${{ matrix.cuda-version }}.txt'
 
+      - name: Prepare SPIRV-Headers CMake Config
+        shell: pwsh
+        run: |
+          # 动态生成 SPIRV-Headers 的 CMake 配置文件，绕过 Windows Vulkan SDK 中配置文件缺失的问题
+          $configDir = "$PWD\cmake-configs\SPIRV-Headers"
+          New-Item -ItemType Directory -Force -Path $configDir
+          
+          # 创建 INTERFACE 库目标，并将包含目录指向 Vulkan SDK 的 Include 文件夹
+          $configContent = @"
+          add_library(SPIRV-Headers INTERFACE)
+          target_include_directories(SPIRV-Headers INTERFACE "`$ENV{VULKAN_SDK}/Include")
+          "@
+          Set-Content -Path "$configDir\SPIRV-HeadersConfig.cmake" -Value $configContent
+          
+          # 将自定义配置目录注入环境变量，供后续 CMake 步骤读取
+          echo "CMAKE_PREFIX_PATH_EXTRA=$PWD\cmake-configs" >> $env:GITHUB_ENV
+
       - name: Configure CMake
         shell: cmd
         run: |
           if exist build rmdir /s /q build
           mkdir build
           cd build
-          :: 添加 CMAKE_PREFIX_PATH 以定位 SPIRV-Headers 等 Vulkan SDK 组件的 CMake 配置文件
-          cmake .. -A x64 -DCMAKE_PREFIX_PATH="%VULKAN_SDK%" -DGGML_CPU_ALL_VARIANTS=ON -DGGML_CUDA=ON -DGGML_VULKAN=ON -DGGML_BACKEND_DL=ON
+          
+          :: 将 Vulkan SDK 根目录与自定义配置目录同时加入 CMAKE_PREFIX_PATH
+          cmake .. -A x64 -DCMAKE_PREFIX_PATH="%VULKAN_SDK%;%CMAKE_PREFIX_PATH_EXTRA%" -DGGML_CPU_ALL_VARIANTS=ON -DGGML_CUDA=ON -DGGML_VULKAN=ON -DGGML_BACKEND_DL=ON
 
       - name: Build Release
         shell: cmd
