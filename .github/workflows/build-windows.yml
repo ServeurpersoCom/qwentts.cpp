@@ -1,0 +1,108 @@
+name: Build Windows Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows (VC${{ matrix.vs-version }} + CUDA ${{ matrix.cuda-version }} + Vulkan)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - vs-version: "17"
+            cuda-version: "12"
+            cuda-installer: "cuda_12.9.0_windows.exe"
+            cuda-url: "https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/cuda_12.9.0_windows.exe"
+            toolset: "v143"
+          - vs-version: "18"
+            cuda-version: "13"
+            cuda-installer: "cuda_13.0.0_windows.exe"
+            cuda-url: "https://developer.download.nvidia.com/compute/cuda/13.0.0/local_installers/cuda_13.0.0_windows.exe"
+            toolset: "v144"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSVC ${{ matrix.toolset }}
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          toolset: ${{ matrix.toolset }}
+
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: "1.3.296.0"
+          install_runtime: true
+          install_development: true
+          cache: true
+
+      - name: Install CUDA Toolkit ${{ matrix.cuda-version }}
+        shell: cmd
+        run: |
+          curl -L -o "${{ matrix.cuda-installer }}" "${{ matrix.cuda-url }}"
+          start /wait "${{ matrix.cuda-installer }}" -s nvcc cuobjdump nvprune cupti cublas_dev cudart cufft_dev curand_dev cusolver_dev cusparse_dev thrust npp_dev nvrtc_dev nvml_dev
+          del "${{ matrix.cuda-installer }}"
+          echo CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}.0>> "%GITHUB_ENV%"
+          echo CUDA_PATH_V${{ matrix.cuda-version }}_0=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}.0>> "%GITHUB_ENV%"
+          echo C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}.0\bin>> "%GITHUB_PATH%"
+          echo C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}.0\libnvvp>> "%GITHUB_PATH%"
+
+      - name: Configure CMake
+        shell: cmd
+        run: |
+          if exist build rmdir /s /q build
+          mkdir build
+          cd build
+          cmake .. -DGGML_CPU_ALL_VARIANTS=ON -DGGML_CUDA=ON -DGGML_VULKAN=ON -DGGML_BACKEND_DL=ON
+
+      - name: Build Release
+        shell: cmd
+        run: |
+          cd build
+          cmake --build . --config Release -j %NUMBER_OF_PROCESSORS%
+
+      - name: Prepare Release Artifacts
+        shell: pwsh
+        run: |
+          $artifactName = "qwen-tts-windows-vc${{ matrix.vs-version }}-cuda${{ matrix.cuda-version }}-vulkan"
+          New-Item -ItemType Directory -Force -Path "release\$artifactName"
+          Copy-Item -Path "build\Release\*" -Destination "release\$artifactName\" -Recurse -Force
+          Compress-Archive -Path "release\$artifactName" -DestinationPath "release\$artifactName.zip" -Force
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen-tts-windows-vc${{ matrix.vs-version }}-cuda${{ matrix.cuda-version }}-vulkan
+          path: release/qwen-tts-windows-vc${{ matrix.vs-version }}-cuda${{ matrix.cuda-version }}-vulkan.zip
+          retention-days: 5
+
+  publish-release:
+    name: Publish Release
+    needs: build-windows
+    runs-on: ubuntu-latest
+    if: always() && startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
