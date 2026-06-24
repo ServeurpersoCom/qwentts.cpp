@@ -73,10 +73,6 @@ struct TalkerWeights {
     int   num_key_value_heads;
     int   head_dim;
     int   vocab_size;
-    int   text_vocab_size;
-    int   text_hidden_size;
-    int   max_position_embeddings;
-    int   position_id_per_seconds;
     float rope_theta;
     float rms_norm_eps;
     int   mrope_section_t;
@@ -100,20 +96,16 @@ struct TalkerWeights {
 };
 
 static bool talker_weights_load(TalkerWeights * tw, const GGUFModel & gf, ggml_backend_t backend) {
-    tw->hidden_size             = (int) gf_get_u32(gf, "qwen3-tts.talker.embedding_length");
-    tw->intermediate_size       = (int) gf_get_u32(gf, "qwen3-tts.talker.feed_forward_length");
-    tw->num_hidden_layers       = (int) gf_get_u32(gf, "qwen3-tts.talker.block_count");
-    tw->num_attention_heads     = (int) gf_get_u32(gf, "qwen3-tts.talker.attention.head_count");
-    tw->num_key_value_heads     = (int) gf_get_u32(gf, "qwen3-tts.talker.attention.head_count_kv");
-    tw->head_dim                = (int) gf_get_u32(gf, "qwen3-tts.talker.attention.key_length");
-    tw->vocab_size              = (int) gf_get_u32(gf, "qwen3-tts.talker.vocab_size");
-    tw->text_vocab_size         = (int) gf_get_u32(gf, "qwen3-tts.talker.text_vocab_size");
-    tw->text_hidden_size        = (int) gf_get_u32(gf, "qwen3-tts.talker.text_hidden_size");
-    tw->max_position_embeddings = (int) gf_get_u32(gf, "qwen3-tts.talker.context_length");
-    tw->position_id_per_seconds = (int) gf_get_u32(gf, "qwen3-tts.talker.position_id_per_seconds");
-    tw->rope_theta              = gf_get_f32(gf, "qwen3-tts.talker.rope.freq_base");
-    tw->rms_norm_eps            = gf_get_f32(gf, "qwen3-tts.talker.attention.layer_norm_rms_epsilon");
-    tw->mrope_interleaved       = gf_get_bool(gf, "qwen3-tts.talker.rope.mrope_interleaved");
+    tw->hidden_size         = (int) gf_get_u32(gf, "qwen3-tts.talker.embedding_length");
+    tw->intermediate_size   = (int) gf_get_u32(gf, "qwen3-tts.talker.feed_forward_length");
+    tw->num_hidden_layers   = (int) gf_get_u32(gf, "qwen3-tts.talker.block_count");
+    tw->num_attention_heads = (int) gf_get_u32(gf, "qwen3-tts.talker.attention.head_count");
+    tw->num_key_value_heads = (int) gf_get_u32(gf, "qwen3-tts.talker.attention.head_count_kv");
+    tw->head_dim            = (int) gf_get_u32(gf, "qwen3-tts.talker.attention.key_length");
+    tw->vocab_size          = (int) gf_get_u32(gf, "qwen3-tts.talker.vocab_size");
+    tw->rope_theta          = gf_get_f32(gf, "qwen3-tts.talker.rope.freq_base");
+    tw->rms_norm_eps        = gf_get_f32(gf, "qwen3-tts.talker.attention.layer_norm_rms_epsilon");
+    tw->mrope_interleaved   = gf_get_bool(gf, "qwen3-tts.talker.rope.mrope_interleaved");
 
     std::vector<uint32_t> mrope = gf_get_array_u32(gf, "qwen3-tts.talker.rope.mrope_section");
     if (mrope.size() == 3) {

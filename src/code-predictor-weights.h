@@ -42,7 +42,6 @@ struct CodePredictorWeights {
     int   num_key_value_heads;
     int   head_dim;
     int   vocab_size;
-    int   max_position_embeddings;
     int   num_acoustic_codebooks;  // num_code_groups - 1
     float rope_theta;
     float rms_norm_eps;
@@ -68,16 +67,15 @@ struct CodePredictorWeights {
 };
 
 static bool code_predictor_weights_load(CodePredictorWeights * cw, const GGUFModel & gf, ggml_backend_t backend) {
-    cw->hidden_size             = (int) gf_get_u32(gf, "qwen3-tts.code_pred.embedding_length");
-    cw->intermediate_size       = (int) gf_get_u32(gf, "qwen3-tts.code_pred.feed_forward_length");
-    cw->num_hidden_layers       = (int) gf_get_u32(gf, "qwen3-tts.code_pred.block_count");
-    cw->num_attention_heads     = (int) gf_get_u32(gf, "qwen3-tts.code_pred.attention.head_count");
-    cw->num_key_value_heads     = (int) gf_get_u32(gf, "qwen3-tts.code_pred.attention.head_count_kv");
-    cw->head_dim                = (int) gf_get_u32(gf, "qwen3-tts.code_pred.attention.key_length");
-    cw->vocab_size              = (int) gf_get_u32(gf, "qwen3-tts.code_pred.vocab_size");
-    cw->max_position_embeddings = (int) gf_get_u32(gf, "qwen3-tts.code_pred.context_length");
-    cw->rope_theta              = gf_get_f32(gf, "qwen3-tts.code_pred.rope.freq_base");
-    cw->rms_norm_eps            = gf_get_f32(gf, "qwen3-tts.code_pred.attention.layer_norm_rms_epsilon");
+    cw->hidden_size         = (int) gf_get_u32(gf, "qwen3-tts.code_pred.embedding_length");
+    cw->intermediate_size   = (int) gf_get_u32(gf, "qwen3-tts.code_pred.feed_forward_length");
+    cw->num_hidden_layers   = (int) gf_get_u32(gf, "qwen3-tts.code_pred.block_count");
+    cw->num_attention_heads = (int) gf_get_u32(gf, "qwen3-tts.code_pred.attention.head_count");
+    cw->num_key_value_heads = (int) gf_get_u32(gf, "qwen3-tts.code_pred.attention.head_count_kv");
+    cw->head_dim            = (int) gf_get_u32(gf, "qwen3-tts.code_pred.attention.key_length");
+    cw->vocab_size          = (int) gf_get_u32(gf, "qwen3-tts.code_pred.vocab_size");
+    cw->rope_theta          = gf_get_f32(gf, "qwen3-tts.code_pred.rope.freq_base");
+    cw->rms_norm_eps        = gf_get_f32(gf, "qwen3-tts.code_pred.attention.layer_norm_rms_epsilon");
 
     int num_code_groups = (int) gf_get_u32(gf, "qwen3-tts.num_code_groups");
     if (num_code_groups <= 1) {
