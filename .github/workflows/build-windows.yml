@@ -46,8 +46,13 @@ jobs:
         shell: cmd
         run: |
           curl -L -o "${{ matrix.cuda-installer }}" "${{ matrix.cuda-url }}"
-          start /wait "${{ matrix.cuda-installer }}" -s nvcc cuobjdump nvprune cupti cublas_dev cudart cufft_dev curand_dev cusolver_dev cusparse_dev thrust npp_dev nvrtc_dev nvml_dev
+          
+          :: 修复 start 命令陷阱：添加空标题 ""，并仅使用 -s 确保纯静默安装，防止 GUI 弹出
+          start /wait "" "${{ matrix.cuda-installer }}" -s
+          
           del "${{ matrix.cuda-installer }}"
+          
+          :: 注入环境变量
           echo CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}.0>> "%GITHUB_ENV%"
           echo CUDA_PATH_V${{ matrix.cuda-version }}_0=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}.0>> "%GITHUB_ENV%"
           echo C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}.0\bin>> "%GITHUB_PATH%"
