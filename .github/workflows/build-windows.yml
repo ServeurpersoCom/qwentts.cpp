@@ -23,14 +23,11 @@ jobs:
         include:
           - os: windows-2022
             vs-version: "17"
-            cuda-version: "12.9"
-            cuda-installer: "cuda_12.9.0_windows.exe"
-            cuda-url: "https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/cuda_12.9.0_576.02_windows.exe"
+            cuda-version: "12.9.0"
           - os: windows-2025
             vs-version: "18"
-            cuda-version: "13.3"
-            cuda-installer: "cuda_13.3.0_windows.exe"
-            cuda-url: "https://developer.download.nvidia.com/compute/cuda/13.3.0/local_installers/cuda_13.3.0_windows.exe"
+            # 若 13.3.0 尚未被该 Action 收录，请将其改为文档示例中的 "13.2.0"
+            cuda-version: "13.3.0" 
 
     steps:
       - name: Checkout repository
@@ -46,32 +43,22 @@ jobs:
           install_development: true
           cache: true
 
-      - name: Install CUDA Toolkit ${{ matrix.cuda-version }}
-        shell: cmd
-        run: |
-          curl -L -o "${{ matrix.cuda-installer }}" "${{ matrix.cuda-url }}"
-          start /wait "" "${{ matrix.cuda-installer }}" -s
-          del "${{ matrix.cuda-installer }}"
-          
-          :: 使用反斜杠，并采用前置重定向语法防止尾部空格导致路径失效
-          >> "%GITHUB_ENV%" echo CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}
-          >> "%GITHUB_ENV%" echo CUDA_PATH_V${{ matrix.cuda-version }}=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}
-          >> "%GITHUB_PATH%" echo C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}\bin
-          >> "%GITHUB_PATH%" echo C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}\libnvvp
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: ${{ matrix.cuda-version }}
+          # 矩阵构建必须指定日志后缀以防止文件覆盖
+          log-file-suffix: 'vc${{ matrix.vs-version }}-cuda${{ matrix.cuda-version }}.txt'
 
       - name: Configure CMake
         shell: cmd
         run: |
-          :: 在当前会话中强制注入环境变量，确保 MSBuild 能正确读取
-          set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{ matrix.cuda-version }}"
-          set "PATH=%CUDA_PATH%\bin;%PATH%"
-          
           if exist build rmdir /s /q build
           mkdir build
           cd build
-          
-          :: 显式指定 CUDAToolkit_ROOT 和 CMAKE_CUDA_COMPILER 绕过自动检测缺陷
-          cmake .. -A x64 -DCUDAToolkit_ROOT="%CUDA_PATH%" -DCMAKE_CUDA_COMPILER="%CUDA_PATH%\bin\nvcc.exe" -DGGML_CPU_ALL_VARIANTS=ON -DGGML_CUDA=ON -DGGML_VULKAN=ON -DGGML_BACKEND_DL=ON
+          :: Action 已自动处理环境变量与 VS 集成，CMake 可直接识别 CUDA
+          cmake .. -A x64 -DGGML_CPU_ALL_VARIANTS=ON -DGGML_CUDA=ON -DGGML_VULKAN=ON -DGGML_BACKEND_DL=ON
 
       - name: Build Release
         shell: cmd
