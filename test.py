@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """
-Test script for zero-shot voice cloning API.
-Loads reference audio and text from asset directory.
+QwenTTS 零样本语音克隆 API 测试套件。
+
+前提条件：
+  1. TTS 服务器已启动（默认 127.0.0.1:8080）
+  2. 使用 base 模型（如 qwen-talker-1.7b-base）
+     - base 模型：支持零样本克隆（ref_wav_b64 / ref_wav_path）
+     - custom_voice 模型：支持固定音色（voice 参数），不支持零样本
+     - voice_design 模型：支持风格指令（instructions），不支持零样本
+  3. 测试资源文件存在于 asset/ 和 examples/ 目录
+
+运行方式：
+  python test.py
 """
 
 import requests
@@ -11,16 +21,16 @@ import sys
 import os
 from pathlib import Path
 
-# Configuration
+# ── 服务器配置 ──
 API_BASE_URL = "http://127.0.0.1:8080"
 ASSET_DIR = Path(__file__).parent / "asset"
 EXAMPLES_DIR = Path(__file__).parent / "examples"
 OUTPUT_DIR = Path(__file__).parent / "test_output"
 
-# Create output directory
+# 创建测试输出目录
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Test assets
+# ── 测试资源路径 ──
 REF_WAV = ASSET_DIR / "ref.wav"
 REF_TXT = ASSET_DIR / "ref.txt"
 FREEMAN_WAV = EXAMPLES_DIR / "freeman.wav"
@@ -28,19 +38,24 @@ FREEMAN_TXT = EXAMPLES_DIR / "freeman.txt"
 
 
 def load_ref_text(txt_path):
-    """Load reference text from file."""
+    """加载参考音频对应的文本转录。"""
     with open(txt_path, 'r', encoding='utf-8') as f:
         return f.read().strip()
 
 
 def load_wav_b64(wav_path):
-    """Load WAV file and encode as base64."""
+    """读取 WAV 文件并编码为 Base64 字符串。"""
     with open(wav_path, 'rb') as f:
         return base64.b64encode(f.read()).decode('utf-8')
 
 
 def test_zero_shot_b64():
-    """Test zero-shot synthesis with Base64 reference audio."""
+    """零样本合成 — Base64 参考音频模式（需要 base 模型）。
+
+    通过 ref_wav_b64 字段传入 Base64 编码的参考音频，
+    配合 ref_text 提供参考音频的文本转录。
+    服务器会将参考音频编码为说话人嵌入和 RVQ 码，用于零样本克隆。
+    """
     print("\n" + "="*60)
     print("Test 1: Zero-shot synthesis with Base64 reference audio")
     print("="*60)
@@ -57,16 +72,16 @@ def test_zero_shot_b64():
         print(f"✓ Loaded reference text: {ref_text[:50]}...")
         print(f"✓ Base64 encoded (length: {len(ref_wav_b64)})")
         
-        # 验证 Base64 的前 50 字符和后 50 字符
+        # 客户端侧验证：打印 Base64 前后各 50 字符，用于调试
         print(f"  Base64 前 50 字符: {ref_wav_b64[:50]}")
         print(f"  Base64 后 50 字符: {ref_wav_b64[-50:]}")
         
-        # 验证 Base64 可以解码
+        # 验证 Python 侧 Base64 解码是否正常（与服务端解码独立）
         import base64
         try:
             decoded = base64.b64decode(ref_wav_b64)
             print(f"  ✓ Base64 解码成功，大小: {len(decoded)} 字节")
-            # 检查 WAV 头
+            # 检查 WAV 文件头（RIFF + WAVE）
             if decoded[:4] == b'RIFF' and decoded[8:12] == b'WAVE':
                 print(f"  ✓ 解码后为有效的 WAV 文件")
             else:
@@ -113,7 +128,11 @@ def test_zero_shot_b64():
 
 
 def test_zero_shot_path():
-    """Test zero-shot synthesis with file path reference audio (freeman.wav)."""
+    """零样本合成 — 文件路径模式，使用 examples/freeman.wav（需要 base 模型）。
+
+    通过 ref_wav_path 字段传入服务器可读的绝对路径，
+    避免 Base64 编解码开销，适合大文件参考音频。
+    """
     print("\n" + "="*60)
     print("Test 2: Zero-shot synthesis with file path (freeman.wav)")
     print("="*60)
@@ -167,7 +186,11 @@ def test_zero_shot_path():
 
 
 def test_zero_shot_path_ref():
-    """Test zero-shot synthesis with file path reference audio (asset/ref.wav)."""
+    """零样本合成 — 文件路径模式，使用 asset/ref.wav（需要 base 模型）。
+
+    与 test_zero_shot_path 相同，但使用不同的参考音频，
+    验证不同音频文件的克隆效果和缓存独立性。
+    """
     print("\n" + "="*60)
     print("Test 2b: Zero-shot synthesis with file path (asset/ref.wav)")
     print("="*60)
@@ -221,7 +244,13 @@ def test_zero_shot_path_ref():
 
 
 def test_encode_endpoint():
-    """Test /v1/audio/encode endpoint."""
+    """预编码端点 /v1/audio/encode（需要 base 模型）。
+
+    将参考音频预编码为说话人嵌入（spk）和 RVQ 码本（rvq），
+    编码结果按内容哈希缓存到 qwentts_server_cache/ 目录。
+    相同音频重复调用会命中缓存，返回 cached: true。
+    ref_text 为必填字段，与编码结果一同保存为 {hash}.txt。
+    """
     print("\n" + "="*60)
     print("Test 3: /v1/audio/encode pre-encoding endpoint")
     print("="*60)
@@ -263,7 +292,7 @@ def test_encode_endpoint():
         print(f"   - Speaker embedding (.spk): {len(result.get('spk', ''))} chars (base64)")
         print(f"   - RVQ codebook (.rvq): {len(result.get('rvq', ''))} chars (base64)")
         
-        # Save the result
+        # 保存编码结果到 JSON（含 hash、spk、rvq、ref_text、cached 字段）
         output_file = OUTPUT_DIR / "test_encode_result.json"
         with open(output_file, 'w') as f:
             json.dump(result, f, indent=2)
@@ -279,7 +308,13 @@ def test_encode_endpoint():
 
 
 def test_cache_hit():
-    """Test that repeated requests use cache (faster)."""
+    """缓存命中测试（需要 base 模型）。
+
+    发送两次相同的零样本合成请求：
+    第一次：缓存未命中 → 编码参考音频 → 保存到缓存 → 合成
+    第二次：缓存命中 → 加载预编码 → 直接合成
+    预期第二次请求更快（跳过编码步骤）。
+    """
     print("\n" + "="*60)
     print("Test 4: Cache hit (repeated request should be faster)")
     print("="*60)
@@ -301,7 +336,7 @@ def test_cache_hit():
         
         import time
         
-        # First request (cache miss)
+        # 第一次请求：缓存未命中，需完整编码
         print("\n📤 First request (cache miss)...")
         start_time = time.time()
         response1 = requests.post(
@@ -317,7 +352,7 @@ def test_cache_hit():
         
         print(f"✓ First request completed in {time1:.2f}s")
         
-        # Second request (cache hit)
+        # 第二次请求：缓存命中，预期更快
         print("\n📤 Second request (cache hit)...")
         start_time = time.time()
         response2 = requests.post(
@@ -348,20 +383,27 @@ def test_cache_hit():
 
 
 def test_regular_synthesis():
-    """Test regular TTS without zero-shot (for comparison)."""
+    """常规 TTS 合成测试（需要 custom_voice 模型）。
+
+    不使用零样本克隆，仅通过 voice 参数选择固定音色。
+    注意：此测试在 base 模型下预期失败，因为 base 模型无预设音色。
+    """
     print("\n" + "="*60)
     print("Test 5: Regular TTS synthesis (non-zero-shot)")
     print("="*60)
     
     try:
+        # voice 参数仅在 custom_voice 模型下生效，需使用 GET /v1/voices 返回的有效音色名
+        # base 模型无预设音色，voice 会被静默忽略，此时输出音色由随机采样决定
         payload = {
             "input": "这是一个常规合成测试。",
-            "voice": "default",
+            "voice": "default",  # 需替换为 custom_voice 模型的实际音色名
             "response_format": "wav"
         }
         
-        print(f"📤 Sending regular TTS request...")
-        print(f"   Input: {payload['input']}")
+        print(f"📤 发送常规 TTS 请求...")
+        print(f"   输入文本: {payload['input']}")
+        print(f"   音色: {payload['voice']}（仅 custom_voice 模型生效）")
         
         response = requests.post(
             f"{API_BASE_URL}/v1/audio/speech",
@@ -370,7 +412,7 @@ def test_regular_synthesis():
         )
         
         if response.status_code != 200:
-            print(f"⚠️  Regular synthesis not available: HTTP {response.status_code}")
+            print(f"⚠️  常规合成不可用: HTTP {response.status_code}（base 模型下预期失败）")
             return False
         
         output_file = OUTPUT_DIR / "test_regular_synthesis.wav"
@@ -387,7 +429,7 @@ def test_regular_synthesis():
 
 
 def test_health():
-    """Test server health endpoint."""
+    """服务器健康检查。确认 TTS 服务器已启动并可访问。"""
     print("\n" + "="*60)
     print("Test 0: Server health check")
     print("="*60)
@@ -402,23 +444,25 @@ def test_health():
             return False
     except Exception as e:
         print(f"❌ Cannot connect to server: {e}")
-        print(f"\nPlease ensure the TTS server is running:")
+        print(f"\n请确保 TTS 服务器已启动：")
         print(f"  ./build/tts-server --model models/qwen-talker-1.7b-base-Q8_0.gguf \\")
         print(f"                     --codec models/qwen-tokenizer-12hz-Q8_0.gguf")
         return False
 
 
 def main():
-    """Run all tests."""
+    """运行所有测试用例。"""
     print("\n" + "="*60)
-    print("QwenTTS Zero-shot Voice Cloning Test Suite")
+    print("QwenTTS 零样本语音克隆 API 测试套件")
     print("="*60)
+    print("  前提：服务器已启动，使用 base 模型")
+    print("  输出目录：", OUTPUT_DIR.absolute())
     
-    # Check if server is running
+    # 先检查服务器是否在线
     if not test_health():
         sys.exit(1)
     
-    # Run tests
+    # 按顺序执行测试
     results = {}
     results["health"] = test_health()
     results["zero_shot_b64"] = test_zero_shot_b64()
@@ -428,7 +472,7 @@ def main():
     results["cache_hit"] = test_cache_hit()
     results["regular_synthesis"] = test_regular_synthesis()
     
-    # Summary
+    # 输出测试结果汇总
     print("\n" + "="*60)
     print("Test Summary")
     print("="*60)
@@ -440,8 +484,9 @@ def main():
         status = "✅ PASS" if result else "❌ FAIL"
         print(f"{status}: {name}")
     
-    print(f"\nTotal: {passed}/{total} tests passed")
-    print(f"Output directory: {OUTPUT_DIR.absolute()}")
+    print(f"\n通过: {passed}/{total} 个测试")
+    print(f"输出目录: {OUTPUT_DIR.absolute()}")
+    print(f"\n注意: regular_synthesis 测试在 base 模型下预期失败，属于正常现象")
     
     return 0 if passed == total else 1
 

@@ -42,6 +42,40 @@ serves text-to-speech synthesis over a REST API.
 
 ---
 
+## Model types
+
+The server supports three model types, determined at init time by the loaded
+GGUF checkpoint. Each type accepts a different set of synthesis parameters.
+
+| Model type | `voice` | `instructions` | `ref_wav_b64` / `ref_wav_path` | Description |
+|---|---|---|---|---|
+| **base** | Ignored | Ignored | Supported | Zero-shot voice cloning via reference audio. No preset speakers. |
+| **custom_voice** | Required | Optional | Rejected | Fixed speaker voices. `voice` must be a name from `GET /v1/voices`. |
+| **voice_design** | Rejected | Required | Rejected | Style-controlled synthesis via `instructions`. No speaker selection. |
+
+> **Note**: The `voice` parameter is **only effective** with `custom_voice` models.
+> With a base model, `voice` is silently ignored — use `ref_wav_b64` / `ref_wav_path`
+> for zero-shot cloning instead. Use `GET /v1/voices` to check which speakers
+> are available (empty array = base or voice_design model).
+
+## Sampling
+
+TTS synthesis uses autoregressive sampling. Even with identical inputs, each
+call produces slightly different audio (natural prosody variation). Sampling
+behavior can be tuned via the ABI parameters:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `temperature` | `0.9` | Sampling temperature. Lower = more deterministic. |
+| `top_k` | `50` | Top-k sampling. |
+| `top_p` | `1.0` | Nucleus sampling. |
+| `seed` | `-1` | Random seed. `-1` uses hardware randomness (`std::random_device`). Set a fixed value for reproducible output. |
+
+These parameters are not exposed in the HTTP API (server uses ABI defaults).
+To customize them, use the C ABI or Python bindings directly.
+
+---
+
 ## Endpoints
 
 ### POST /v1/audio/speech
@@ -61,7 +95,7 @@ Content-Type: application/json
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `input` | string | Yes | — | Text to speak. Must be non-empty. |
-| `voice` | string | No | `""` | Speaker name. Maps to a loaded speaker when the model contains embedded speakers. Ignored when the model has none. Also ignored in zero-shot cloning mode. |
+| `voice` | string | No | `""` | Speaker name. **custom_voice models only**: maps to a loaded speaker from `GET /v1/voices`. Silently ignored for base and voice_design models (returns empty array on `GET /v1/voices`). Also ignored in zero-shot cloning mode. |
 | `instructions` | string | No | `""` | Voice style instructions (e.g. tone, emotion). Maps to the instruct field in the ABI. Ignored in zero-shot cloning mode. |
 | `response_format` | string | No | `"pcm"` | Output format. `"pcm"` for streaming s16le audio, `"wav"` for a one-shot RIFF WAV file. |
 | `speed` | number | No | `1.0` | Speed multiplier. Parsed for compatibility but currently ignored (no time-stretch in the ABI). |
