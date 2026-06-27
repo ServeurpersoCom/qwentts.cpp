@@ -94,6 +94,9 @@ int main(void) {
     struct qt_audio audio = { 0 };
     qt_audio_free(&audio);
 
+    struct qt_voice_ref voice_ref = { 0 };
+    qt_voice_ref_free(&voice_ref);
+
     /* Install the log callback before the failing init so the [Qwen]
      * ERROR line lands on stub_log instead of stderr. */
     qt_log_set(stub_log, NULL);
@@ -136,9 +139,9 @@ int main(void) {
      * rejected up front, before any allocation. */
     struct qt_init_params future_iparams;
     qt_init_default_params(&future_iparams);
-    future_iparams.talker_path = "irrelevant.gguf";
-    future_iparams.codec_path  = "irrelevant.gguf";
-    future_iparams.abi_version = QT_ABI_VERSION + 1;
+    future_iparams.talker_path   = "irrelevant.gguf";
+    future_iparams.codec_path    = "irrelevant.gguf";
+    future_iparams.abi_version   = QT_ABI_VERSION + 1;
     struct qt_context * rejected = qt_init(&future_iparams);
     if (rejected != NULL) {
         fprintf(stderr, "[Probe] qt_init accepted a future abi_version\n");
@@ -151,6 +154,13 @@ int main(void) {
         fprintf(stderr, "[Probe] qt_synthesize(NULL) returned %d, expected %d\n", (int) rc,
                 (int) QT_STATUS_INVALID_PARAMS);
         return 3;
+    }
+
+    rc = qt_extract_voice_ref(NULL, NULL, 0, &voice_ref);
+    if (rc != QT_STATUS_INVALID_PARAMS) {
+        fprintf(stderr, "[Probe] qt_extract_voice_ref(NULL) returned %d, expected %d\n", (int) rc,
+                (int) QT_STATUS_INVALID_PARAMS);
+        return 11;
     }
 
     int frames = qt_duration_sec_to_tokens(NULL, 1.0f);
@@ -177,6 +187,7 @@ int main(void) {
 
     qt_free(NULL);
     qt_audio_free(&audio);
+    qt_voice_ref_free(&voice_ref);
 
     return 0;
 }

@@ -20,6 +20,7 @@
 #include "bpe.h"
 #include "pipeline-tts.h"
 #include "qt-error.h"
+#include "speaker-encoder-extract.h"
 #include "version.h"
 
 #include <atomic>
@@ -27,9 +28,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 // Internal definition of the opaque handle. C++ types are fine here
 // because nothing in this struct ever crosses the public ABI boundary :
@@ -298,6 +301,121 @@ void qt_free(struct qt_context * q) {
     pipeline_tts_free(&q->pt);
     backend_release(q->bp.backend, q->bp.cpu_backend);
     delete q;
+}
+
+void qt_voice_ref_free(struct qt_voice_ref * ref) {
+    if (!ref) {
+        return;
+    }
+    if (ref->ref_spk_emb) {
+        std::free(ref->ref_spk_emb);
+    }
+    if (ref->ref_codes) {
+        std::free(ref->ref_codes);
+    }
+    ref->ref_spk_emb   = nullptr;
+    ref->ref_spk_dim   = 0;
+    ref->ref_codes     = nullptr;
+    ref->ref_T         = 0;
+    ref->num_codebooks = 0;
+}
+
+enum qt_status qt_extract_voice_ref(struct qt_context *   q,
+                                    const float *         ref_audio_24k,
+                                    int                   ref_n_samples,
+                                    struct qt_voice_ref * out) {
+    if (out) {
+        qt_voice_ref_free(out);
+    }
+    if (!q || !ref_audio_24k || !out) {
+        qt_set_error("qt_extract_voice_ref: q, ref_audio_24k or out is NULL");
+        return QT_STATUS_INVALID_PARAMS;
+    }
+    if (ref_n_samples < TOKENIZER_HOP_LENGTH) {
+        qt_set_error("qt_extract_voice_ref: ref_audio_24k too short for RVQ encode (%d samples, need at least %d)",
+                     ref_n_samples, TOKENIZER_HOP_LENGTH);
+        return QT_STATUS_INVALID_PARAMS;
+    }
+
+    const std::string & mt = q->pt.model_type;
+    if (mt != "base") {
+        qt_set_error("qt_extract_voice_ref: voice references are only valid for base models (loaded: %s)", mt.c_str());
+        return QT_STATUS_MODE_INVALID;
+    }
+    if (!q->pt.has_speaker_encoder) {
+        qt_set_error("qt_extract_voice_ref: loaded base model has no speaker encoder");
+        return QT_STATUS_GENERATE_FAILED;
+    }
+    if (q->pt.num_code_groups <= 0) {
+        qt_set_error("qt_extract_voice_ref: invalid codebook count %d", q->pt.num_code_groups);
+        return QT_STATUS_GENERATE_FAILED;
+    }
+
+    try {
+        std::vector<float> emb;
+        if (!speaker_encoder_extract(&q->pt.speaker_encoder, q->pt.sched, ref_audio_24k, ref_n_samples, emb)) {
+            qt_set_error("qt_extract_voice_ref: speaker embedding extraction failed");
+            return QT_STATUS_GENERATE_FAILED;
+        }
+        if ((int) emb.size() != q->pt.talker.hidden_size) {
+            qt_set_error("qt_extract_voice_ref: speaker embedding size %zu mismatches talker hidden %d", emb.size(),
+                         q->pt.talker.hidden_size);
+            return QT_STATUS_GENERATE_FAILED;
+        }
+
+        const int            aligned_n = (ref_n_samples / TOKENIZER_HOP_LENGTH) * TOKENIZER_HOP_LENGTH;
+        const int            ref_T     = aligned_n / TOKENIZER_HOP_LENGTH;
+        std::vector<int32_t> codes     = pipeline_codec_encode(&q->pt.codec, ref_audio_24k, aligned_n);
+        if (codes.empty()) {
+            qt_set_error("qt_extract_voice_ref: pipeline_codec_encode returned empty codes");
+            return QT_STATUS_GENERATE_FAILED;
+        }
+        const int num_codebooks = q->pt.num_code_groups;
+        if ((codes.size() % (size_t) num_codebooks) != 0) {
+            qt_set_error("qt_extract_voice_ref: encoded code count %zu is not divisible by %d", codes.size(),
+                         num_codebooks);
+            return QT_STATUS_GENERATE_FAILED;
+        }
+        const int codes_T = (int) (codes.size() / (size_t) num_codebooks);
+        if (codes_T != ref_T) {
+            qt_set_error("qt_extract_voice_ref: encoded frame count %d mismatches aligned frame count %d", codes_T,
+                         ref_T);
+            return QT_STATUS_GENERATE_FAILED;
+        }
+
+        const size_t emb_bytes   = emb.size() * sizeof(float);
+        const size_t codes_bytes = codes.size() * sizeof(int32_t);
+        float *      emb_copy    = (float *) std::malloc(emb_bytes);
+        int32_t *    codes_copy  = (int32_t *) std::malloc(codes_bytes);
+        if (!emb_copy || !codes_copy) {
+            std::free(emb_copy);
+            std::free(codes_copy);
+            qt_set_error("qt_extract_voice_ref: malloc failed for %zu emb bytes and %zu code bytes", emb_bytes,
+                         codes_bytes);
+            return QT_STATUS_OOM;
+        }
+        std::memcpy(emb_copy, emb.data(), emb_bytes);
+        std::memcpy(codes_copy, codes.data(), codes_bytes);
+
+        out->ref_spk_emb   = emb_copy;
+        out->ref_spk_dim   = (int) emb.size();
+        out->ref_codes     = codes_copy;
+        out->ref_T         = ref_T;
+        out->num_codebooks = num_codebooks;
+
+        qt_log(QT_LOG_INFO, "[Qwen] Extracted voice ref: spk_dim=%d K=%d T=%d (%d/%d samples)", out->ref_spk_dim,
+               out->num_codebooks, out->ref_T, aligned_n, ref_n_samples);
+        return QT_STATUS_OK;
+    } catch (const std::bad_alloc &) {
+        qt_set_error("qt_extract_voice_ref: out of memory");
+        qt_voice_ref_free(out);
+        return QT_STATUS_OOM;
+    } catch (const std::exception & e) {
+        qt_set_error("%s", e.what());
+        qt_log(QT_LOG_ERROR, "[Qwen] %s", e.what());
+        qt_voice_ref_free(out);
+        return QT_STATUS_GENERATE_FAILED;
+    }
 }
 
 enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params * params, struct qt_audio * out) {

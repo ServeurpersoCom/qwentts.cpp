@@ -137,6 +137,44 @@ QT_API struct qt_context * qt_init(const struct qt_init_params * params);
 // Safe on NULL.
 QT_API void qt_free(struct qt_context * q);
 
+// Precomputed Base-model voice reference latents. Plain POD: both
+// pointers are malloc allocated by qt_extract_voice_ref, owned by the
+// struct, released by qt_voice_ref_free. Do not free either pointer
+// directly nor reassign without freeing first. Zero initialise before
+// first use: `struct qt_voice_ref ref = {0};`.
+//
+// ref_spk_emb is the speaker embedding equivalent to a raw .spk file.
+// ref_codes is the RVQ code matrix equivalent to a raw .rvq file,
+// laid out [num_codebooks, ref_T] row-major (T fastest).
+struct qt_voice_ref {
+    float *   ref_spk_emb;
+    int       ref_spk_dim;
+    int32_t * ref_codes;
+    int       ref_T;
+    int       num_codebooks;
+};
+
+// Extract reusable voice-clone conditioning from a decoded reference
+// .wav/audio buffer: mono float32 PCM at 24 kHz. Requires a loaded Base
+// model with speaker encoder weights. The speaker embedding consumes the
+// full input buffer, matching --ref-wav clone mode A. RVQ encoding
+// truncates to the codec hop boundary, matching qwen-codec --talker
+// ref.wav / --ref-rvq.
+// For reference-WAV-plus-transcription ICL mode, pass the returned
+// ref_spk_emb and ref_codes back to qt_synthesize together with the
+// transcript in qt_tts_params.ref_text.
+//
+// On success fills out with malloc-owned buffers. On failure leaves out
+// empty and stores a diagnostic in qt_last_error().
+QT_API enum qt_status qt_extract_voice_ref(struct qt_context *   q,
+                                           const float *         ref_audio_24k,
+                                           int                   ref_n_samples,
+                                           struct qt_voice_ref * out);
+
+// Release the speaker embedding and RVQ code buffers and reset the
+// struct to empty. Safe on a zero initialised struct.
+QT_API void qt_voice_ref_free(struct qt_voice_ref * ref);
+
 // Cooperative cancellation callback. Returns true to request the
 // synthesis to abort. Polled at the top of every Talker decode step in
 // the autoregressive loop, so the cancel granularity is roughly one

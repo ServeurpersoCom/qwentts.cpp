@@ -149,6 +149,16 @@ qt_audio_free(&audio);
 qt_free(q);
 ```
 
+Base voice-clone latents can also be precomputed in-process, replacing
+the `qwen-codec --talker ref.wav` shell-out: `qt_extract_voice_ref`
+takes the decoded `.wav` contents as mono float32 PCM at 24 kHz and
+fills a `struct qt_voice_ref` with the `.spk`-equivalent speaker
+embedding plus the `.rvq`-equivalent `[num_codebooks, ref_T]` code
+matrix. Pass those buffers back through `qt_tts_params.ref_spk_emb` /
+`ref_codes`, and for reference-WAV-plus-transcription ICL mode keep
+passing the transcript as `qt_tts_params.ref_text`. Release the buffers
+with `qt_voice_ref_free`.
+
 `tests/abi-c.c` is built with `-std=c99 -Wall -Werror -pedantic` on
 every build (the `test-abi-c` target), so any regression that breaks
 plain C consumability fails the build, not just an opt-in target.
