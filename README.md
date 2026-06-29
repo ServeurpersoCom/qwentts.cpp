@@ -25,6 +25,64 @@ runs on CPU, CUDA, Metal, Vulkan.
 - Two CLI tools : `qwen-tts` (text -> WAV) and `qwen-codec`
   (WAV <-> RVQ codes)
 
+## Use
+
+> Suggest you use this forked version of the compiled build
+
+### [Download the built version](https://github.com/furinasdog/qwentts.cpp/releases)
+
+## Prerequisites & Hardware Compatibility
+
+### 1. Runtime Environment & Package Selection
+All software packages require the corresponding version of the Microsoft Visual C++ (VC) Redistributable and CUDA Toolkit installed on your system. The application will fail to launch without the correct environment.
+
+Please choose the correct package based on your system configuration:
+
+- **`qwen-tts-windows-vc18-cuda13.2.0-vulkan.zip`**
+  - Requires: **VC18** runtime.
+  - Requires: **CUDA Toolkit 13.2.0** for NVIDIA GPU acceleration.
+
+- **`qwen-tts-windows-vc17-cuda12.9.0-vulkan.zip`**
+  - Requires: **VC17** runtime.
+  - Requires: **CUDA Toolkit 12.9.0** for NVIDIA GPU acceleration.
+
+- **`qwen-tts-windows-vc18-nocuda-vulkan.zip`**
+  - Requires: **VC18** runtime.
+
+- **`qwen-tts-windows-vc17-nocuda-vulkan.zip`**
+  - Requires: **VC17** runtime.
+
+### 2. GPU Acceleration & Drivers
+The application automatically detects your GPU and attempts to utilize the available hardware acceleration. Proper driver support is mandatory.
+
+- **NVIDIA GPUs (CUDA):** Ensure the installed NVIDIA driver supports the CUDA version specified in your chosen package.
+- **AMD / Intel / Other GPUs (Vulkan):** For non-NVIDIA hardware, the application utilizes Vulkan acceleration.
+  > **Note:** Vulkan support is implemented via third-party tools rather than official SDKs. If your GPU does not support the latest Vulkan specifications, hardware acceleration may be unavailable.
+- **CPU Fallback:** If no compatible GPU or appropriate drivers are detected, the application will default to CPU execution.
+
+## Quick Start Guide
+
+### Step 1: Download Models
+Before launching the server, the required models must be downloaded to your local environment.
+1. Execute `download-models.exe` to download the default models.
+2. Run `download-models.exe --help` in your terminal for advanced configuration and download options.
+
+### Step 2: Run the Services
+
+#### HTTP Server (For Integration)
+The primary component `tts-server.exe` launches the core HTTP service and loads the default models upon initialization.
+```bash
+tts-server.exe
+```
+*Refer to `tts-server.exe --help` for detailed execution parameters, configuration flags, and API documentation.*
+
+#### WebUI (For Testing)
+A basic WebUI (`tts-webui.exe`) is provided for convenient testing of the TTS capabilities.
+```bash
+tts-webui.exe
+```
+*Refer to `tts-webui.exe --help` for detailed usage instructions.*
+
 ## Build
 
 ```
