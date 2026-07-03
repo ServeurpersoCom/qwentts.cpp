@@ -14,6 +14,7 @@
 #include "audio-io.h"
 #include "qwen.h"
 #include "rvq-file.h"
+#include "utf8.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,11 @@
 #include <memory>
 #include <sstream>
 #include <string>
+
+#if defined(_WIN32)
+#    include <fcntl.h>
+#    include <io.h>
+#endif
 
 static void print_usage(const char * prog) {
     fprintf(stderr, "qwentts.cpp %s\n\n", qt_version());
@@ -98,19 +104,25 @@ struct Args {
     float        codec_left_context_sec;
 };
 
-// Read all of stdin into a string. Trims trailing newlines so a piped
-// text file behaves like clean utterance input.
+// Read all of stdin into a string. Binary mode on Windows so UTF-16 input
+// survives CRLF translation, then normalised to UTF-8. Trims trailing
+// newlines so a piped text file behaves like clean utterance input.
 static std::string read_stdin_text() {
+#if defined(_WIN32)
+    _setmode(_fileno(stdin), _O_BINARY);
+#endif
     std::ostringstream ss;
     ss << std::cin.rdbuf();
     std::string s = ss.str();
+    utf8_normalize(s);
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
         s.pop_back();
     }
     return s;
 }
 
-// Read a small text file into a string. Trims trailing newlines.
+// Read a small text file into a string, normalised to UTF-8.
+// Trims trailing newlines.
 // 11 bits per code (V <= 2048), matching qwen-codec.
 static const int RVQ_CODE_BITS = 11;
 
@@ -140,7 +152,7 @@ static bool read_spk_file(const char * path, std::vector<float> & emb) {
 }
 
 static bool read_text_file(const char * path, std::string & out) {
-    FILE * f = fopen(path, "rb");
+    FILE * f = utf8_fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "[CLI] FATAL: cannot open '%s'\n", path);
         return false;
@@ -160,6 +172,7 @@ static bool read_text_file(const char * path, std::string & out) {
         return false;
     }
     fclose(f);
+    utf8_normalize(out);
     while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
         out.pop_back();
     }
