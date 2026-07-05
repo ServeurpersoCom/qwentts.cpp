@@ -6,11 +6,32 @@
 #include "tts-server.h"
 
 #include "qwen.h"
+#include "rvq-file.h"
 #include "version.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_map>
+#include <vector>
+
+// Packed .rvq code width, fixed by the Qwen3-TTS 12 Hz codec (2048
+// entries per codebook).
+static const int RVQ_CODE_BITS = 11;
+
+// One registered cloned voice: the extraction latents in the ABI
+// ownership contract (malloc-owned, released by qt_voice_ref_free) plus
+// the reference transcript that enables ICL clone mode when present.
+struct voice_entry {
+    struct qt_voice_ref ref;
+    std::string         ref_text;
+};
+
+// Registered voices, name keyed. Every access happens under
+// g_synth_mutex: registration touches the GPU through the extraction
+// path and lookups run inside the already serialized synthesize.
+static std::unordered_map<std::string, voice_entry> g_voices;
 
 static void print_usage(const char * prog) {
     fprintf(stderr, "qwentts.cpp %s\n\n", QWEN_VERSION);
@@ -94,15 +115,108 @@ int main(int argc, char ** argv) {
         be.voices.push_back(qt_speaker_name(q, i));
     }
 
+    // Voice registry: POST /v1/voices stores a cloned voice either from a
+    // WAV (server side extraction through qt_extract_voice_ref) or from
+    // pre-extracted .spk / .rvq payloads. Re-registering a name replaces
+    // the previous entry.
+    be.register_voice = [q](const tts_voice_upload & up, std::string & err) -> bool {
+        voice_entry entry;
+        entry.ref      = {};
+        entry.ref_text = up.ref_text;
+
+        if (!up.wav.empty()) {
+            int     T   = 0;
+            float * pcm = audio_read_mono_buf((const uint8_t *) up.wav.data(), up.wav.size(), 24000, &T);
+            if (!pcm) {
+                err = "cannot decode the WAV payload";
+                return false;
+            }
+            enum qt_status rc;
+            {
+                std::lock_guard<std::mutex> lock(g_synth_mutex);
+                rc = qt_extract_voice_ref(q, pcm, T, &entry.ref);
+            }
+            free(pcm);
+            if (rc != QT_STATUS_OK) {
+                err = qt_last_error();
+                return false;
+            }
+        } else {
+            if (up.spk.size() % sizeof(float) != 0 || up.spk.empty()) {
+                err = "'spk_b64' must decode to a positive multiple of 4 bytes";
+                return false;
+            }
+            std::vector<int32_t> codes;
+            int                  ref_T = 0;
+            const int            K     = qt_num_codebooks(q);
+            if (!rvq_read_buf((const uint8_t *) up.rvq.data(), up.rvq.size(), K, RVQ_CODE_BITS, codes, &ref_T)) {
+                err = "'rvq_b64' does not decode to a valid packed code stream";
+                return false;
+            }
+            entry.ref.ref_spk_dim = (int) (up.spk.size() / sizeof(float));
+            entry.ref.ref_spk_emb = (float *) malloc(up.spk.size());
+            std::memcpy(entry.ref.ref_spk_emb, up.spk.data(), up.spk.size());
+            entry.ref.ref_T         = ref_T;
+            entry.ref.num_codebooks = K;
+            entry.ref.ref_codes     = (int32_t *) malloc(codes.size() * sizeof(int32_t));
+            std::memcpy(entry.ref.ref_codes, codes.data(), codes.size() * sizeof(int32_t));
+        }
+
+        std::lock_guard<std::mutex> lock(g_synth_mutex);
+        auto                        it = g_voices.find(up.name);
+        if (it != g_voices.end()) {
+            qt_voice_ref_free(&it->second.ref);
+            g_voices.erase(it);
+        }
+        fprintf(stderr, "[Server] voice '%s' registered (T=%d, ref_text=%s)\n", up.name.c_str(), entry.ref.ref_T,
+                entry.ref_text.empty() ? "no" : "yes");
+        g_voices.emplace(up.name, std::move(entry));
+        return true;
+    };
+
+    be.remove_voice = [](const std::string & name) -> bool {
+        std::lock_guard<std::mutex> lock(g_synth_mutex);
+        auto                        it = g_voices.find(name);
+        if (it == g_voices.end()) {
+            return false;
+        }
+        qt_voice_ref_free(&it->second.ref);
+        g_voices.erase(it);
+        return true;
+    };
+
+    be.registered_voices = []() -> std::vector<std::string> {
+        std::lock_guard<std::mutex> lock(g_synth_mutex);
+        std::vector<std::string>    names;
+        names.reserve(g_voices.size());
+        for (const auto & kv : g_voices) {
+            names.push_back(kv.first);
+        }
+        return names;
+    };
+
     // The adapter always drives the streaming pipeline : on_chunk routes to
     // the shared sink, which either streams to the socket (pcm) or fills a
-    // one-shot buffer (wav). Either way the audio path is identical.
+    // one-shot buffer (wav). Either way the audio path is identical. A
+    // registered voice wins over a model speaker of the same name and
+    // injects the pre-extracted reference latents.
     be.synthesize = [q, &lang](const tts_request & req, const tts_sink & sink, std::string & err) -> int {
         struct qt_tts_params p;
         qt_tts_default_params(&p);
         p.text = req.input.c_str();
         p.lang = lang.c_str();
-        if (!req.voice.empty() && qt_n_speakers(q) > 0) {
+
+        auto vit = req.voice.empty() ? g_voices.end() : g_voices.find(req.voice);
+        if (vit != g_voices.end()) {
+            const voice_entry & v = vit->second;
+            p.ref_spk_emb         = v.ref.ref_spk_emb;
+            p.ref_spk_dim         = v.ref.ref_spk_dim;
+            if (!v.ref_text.empty() && v.ref.ref_codes) {
+                p.ref_codes = v.ref.ref_codes;
+                p.ref_T     = v.ref.ref_T;
+                p.ref_text  = v.ref_text.c_str();
+            }
+        } else if (!req.voice.empty() && qt_n_speakers(q) > 0) {
             p.speaker = req.voice.c_str();
         }
         if (!req.instructions.empty()) {

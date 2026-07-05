@@ -96,17 +96,10 @@ static float * audio_read(const char * path, int * T_out, int * sr_out) {
     return result;
 }
 
-// Read WAV, resample to target_sr, downmix to mono.
-// Returns a flat buffer of T floats at target_sr mono. Caller frees.
-static float * audio_read_mono(const char * path, int target_sr, int * T_out) {
-    int     T   = 0;
-    int     sr  = 0;
-    float * raw = audio_read(path, &T, &sr);
-    if (!raw) {
-        *T_out = 0;
-        return NULL;
-    }
-
+// Resample a planar stereo buffer to target_sr and downmix to mono.
+// Consumes raw (freed on every path). Returns a flat buffer of T floats,
+// caller frees.
+static float * audio_mono_from_planar(float * raw, int T, int sr, int target_sr, int * T_out) {
     // Resample planar stereo to target_sr first to keep both channels
     // coherent when the source rate differs.
     float * stereo_rs = raw;
@@ -142,6 +135,31 @@ static float * audio_read_mono(const char * path, int target_sr, int * T_out) {
 
     *T_out = T_rs;
     return mono;
+}
+
+// Read WAV, resample to target_sr, downmix to mono.
+// Returns a flat buffer of T floats at target_sr mono. Caller frees.
+static float * audio_read_mono(const char * path, int target_sr, int * T_out) {
+    int     T   = 0;
+    int     sr  = 0;
+    float * raw = audio_read(path, &T, &sr);
+    if (!raw) {
+        *T_out = 0;
+        return NULL;
+    }
+    return audio_mono_from_planar(raw, T, sr, target_sr, T_out);
+}
+
+// Same conversion from an in-memory WAV byte buffer.
+static float * audio_read_mono_buf(const uint8_t * data, size_t size, int target_sr, int * T_out) {
+    int     T   = 0;
+    int     sr  = 0;
+    float * raw = audio_io_read_wav_buf(data, size, &T, &sr);
+    if (!raw) {
+        *T_out = 0;
+        return NULL;
+    }
+    return audio_mono_from_planar(raw, T, sr, target_sr, T_out);
 }
 
 // WAV output format

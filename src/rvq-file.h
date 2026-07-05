@@ -60,6 +60,30 @@ static std::vector<int32_t> rvq_unpack_codes(const std::vector<uint8_t> & in, si
 
 // Read a .rvq file and unpack it into K*T codes. T is inferred from the
 // file size.
+// Unpack a raw .rvq byte stream: K codebooks at code_bits per code,
+// LSB-first, [K, T] row-major. T derives from the byte count.
+static bool rvq_read_buf(const uint8_t *        data,
+                         size_t                 size,
+                         int                    K,
+                         int                    code_bits,
+                         std::vector<int32_t> & codes,
+                         int *                  n_frames) {
+    if (size == 0) {
+        fprintf(stderr, "[RVQ] FATAL: empty code stream\n");
+        return false;
+    }
+    const size_t total_bits = size * 8;
+    const size_t n_codes    = total_bits / (size_t) code_bits;
+    if (n_codes == 0 || (n_codes % (size_t) K) != 0) {
+        fprintf(stderr, "[RVQ] FATAL: stream yields %zu codes, not a multiple of K=%d\n", n_codes, K);
+        return false;
+    }
+    std::vector<uint8_t> buf(data, data + size);
+    codes     = rvq_unpack_codes(buf, n_codes, code_bits);
+    *n_frames = (int) (n_codes / (size_t) K);
+    return true;
+}
+
 static bool rvq_read_file(const char * path, int K, int code_bits, std::vector<int32_t> & codes, int * n_frames) {
     FILE * f = utf8_fopen(path, "rb");
     if (!f) {
@@ -81,16 +105,7 @@ static bool rvq_read_file(const char * path, int K, int code_bits, std::vector<i
         return false;
     }
     fclose(f);
-
-    const size_t total_bits = (size_t) sz * 8;
-    const size_t n_codes    = total_bits / (size_t) code_bits;
-    if (n_codes == 0 || (n_codes % (size_t) K) != 0) {
-        fprintf(stderr, "[RVQ] FATAL: %s yields %zu codes, not a multiple of K=%d\n", path, n_codes, K);
-        return false;
-    }
-    codes     = rvq_unpack_codes(buf, n_codes, code_bits);
-    *n_frames = (int) (n_codes / (size_t) K);
-    return true;
+    return rvq_read_buf(buf.data(), buf.size(), K, code_bits, codes, n_frames);
 }
 
 // Pack and write a .rvq file.

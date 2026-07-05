@@ -8,10 +8,15 @@
 // are identical across projects ; only the adapter differs.
 //
 // Endpoints:
-//   POST /v1/audio/speech   OAI text-to-speech
-//   GET  /v1/models         single loaded model
-//   GET  /v1/voices         named speakers (empty when the model has none)
-//   GET  /health            liveness probe
+//   POST   /v1/audio/speech   OAI text-to-speech
+//   GET    /v1/models         single loaded model
+//   GET    /v1/voices         model speakers plus registered cloned voices
+//   POST   /v1/voices         register a cloned voice: {name, ref_text,
+//                             wav_b64} extracts server side, {name,
+//                             ref_text, spk_b64, rvq_b64} takes
+//                             pre-extracted latents verbatim
+//   DELETE /v1/voices/{name}  drop a registered voice
+//   GET    /health            liveness probe
 //
 // Audio out: response_format "pcm" streams s16le 24 kHz mono chunked as it
 // is generated (real time), "wav" returns a one-shot RIFF file. pcm is the
@@ -39,6 +44,19 @@ struct tts_request {
     float       speed;         // OAI speed, parsed then ignored (no time stretch in the ABI)
 };
 
+// One voice registration parsed from the POST /v1/voices JSON body.
+// Exactly one payload form is present: wav holds decoded base64 WAV
+// bytes for server side extraction, or spk plus rvq hold the raw
+// contents of pre-extracted .spk and .rvq files. ref_text carries the
+// reference transcript enabling ICL clone mode when present.
+struct tts_voice_upload {
+    std::string name;
+    std::string ref_text;
+    std::string wav;  // WAV file bytes
+    std::string spk;  // .spk file bytes, raw f32 values
+    std::string rvq;  // .rvq file bytes, packed codes
+};
+
 // The adapter pushes mono f32 24 kHz audio here. Returns false to abort the
 // synthesis (client gone or cancellation), which propagates into the ABI
 // on_chunk and stops generation.
@@ -53,6 +71,13 @@ struct tts_backend {
     // the ABI status (0 on success), and fills err with the ABI message on
     // failure. The shared layer maps the status to an HTTP code.
     std::function<int(const tts_request & req, const tts_sink & sink, std::string & err)> synthesize;
+    // Voice registry hooks, all optional: a null hook answers 501 on the
+    // matching route. register_voice stores or replaces a cloned voice,
+    // remove_voice drops one (false when absent), registered_voices lists
+    // the current names for GET /v1/voices alongside the model speakers.
+    std::function<bool(const tts_voice_upload & up, std::string & err)>                   register_voice;
+    std::function<bool(const std::string & name)>                                         remove_voice;
+    std::function<std::vector<std::string>()>                                             registered_voices;
 };
 
 struct server_config {
@@ -215,6 +240,131 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
     });
 }
 
+// Decode standard base64 (with optional padding) into out. Returns
+// false on any character outside the alphabet.
+static bool tts_b64_decode(const std::string & in, std::string & out) {
+    static int8_t table[256];
+    static bool   init = false;
+    if (!init) {
+        for (int i = 0; i < 256; i++) {
+            table[i] = -1;
+        }
+        const char * alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; i++) {
+            table[(uint8_t) alpha[i]] = (int8_t) i;
+        }
+        init = true;
+    }
+
+    out.clear();
+    out.reserve(in.size() / 4 * 3);
+    uint32_t acc  = 0;
+    int      bits = 0;
+    for (char c : in) {
+        if (c == '=' || c == '\n' || c == '\r') {
+            continue;
+        }
+        int8_t v = table[(uint8_t) c];
+        if (v < 0) {
+            return false;
+        }
+        acc = (acc << 6) | (uint32_t) v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((char) ((acc >> bits) & 0xff));
+        }
+    }
+    return true;
+}
+
+// Parse the POST /v1/voices body: name plus either wav_b64 or the
+// spk_b64 / rvq_b64 pair, ref_text optional (enables ICL clone mode).
+static bool tts_parse_voice_upload(const std::string & body, tts_voice_upload & up, std::string & err) {
+    yyjson_doc * doc = yyjson_read(body.c_str(), body.size(), 0);
+    if (!doc) {
+        err = "request body is not valid JSON";
+        return false;
+    }
+    yyjson_val * root = yyjson_doc_get_root(doc);
+    if (!yyjson_is_obj(root)) {
+        err = "request body must be a JSON object";
+        yyjson_doc_free(doc);
+        return false;
+    }
+
+    yyjson_val * name = yyjson_obj_get(root, "name");
+    if (!yyjson_is_str(name) || yyjson_get_len(name) == 0) {
+        err = "'name' must be a non-empty string";
+        yyjson_doc_free(doc);
+        return false;
+    }
+    up.name = yyjson_get_str(name);
+
+    yyjson_val * ref_text = yyjson_obj_get(root, "ref_text");
+    up.ref_text           = yyjson_is_str(ref_text) ? yyjson_get_str(ref_text) : "";
+
+    yyjson_val * wav = yyjson_obj_get(root, "wav_b64");
+    yyjson_val * spk = yyjson_obj_get(root, "spk_b64");
+    yyjson_val * rvq = yyjson_obj_get(root, "rvq_b64");
+
+    const bool has_wav = yyjson_is_str(wav) && yyjson_get_len(wav) > 0;
+    const bool has_spk = yyjson_is_str(spk) && yyjson_get_len(spk) > 0;
+    const bool has_rvq = yyjson_is_str(rvq) && yyjson_get_len(rvq) > 0;
+
+    const bool has_latents = has_spk && has_rvq;
+    if (has_spk != has_rvq || has_wav == has_latents) {
+        err = "provide either 'wav_b64' or both 'spk_b64' and 'rvq_b64'";
+        yyjson_doc_free(doc);
+        return false;
+    }
+    if ((has_wav && !tts_b64_decode(yyjson_get_str(wav), up.wav)) ||
+        (has_spk && !tts_b64_decode(yyjson_get_str(spk), up.spk)) ||
+        (has_rvq && !tts_b64_decode(yyjson_get_str(rvq), up.rvq))) {
+        err = "invalid base64 payload";
+        yyjson_doc_free(doc);
+        return false;
+    }
+    yyjson_doc_free(doc);
+    return true;
+}
+
+static void tts_handle_voice_register(const tts_backend &      be,
+                                      const httplib::Request & http_req,
+                                      httplib::Response &      res) {
+    if (!be.register_voice) {
+        tts_json_error(res, 501, "not_implemented", "this backend has no voice registry");
+        return;
+    }
+    tts_voice_upload up;
+    std::string      err;
+    if (!tts_parse_voice_upload(http_req.body, up, err)) {
+        tts_json_error(res, 400, "invalid_request_error", err.c_str());
+        return;
+    }
+    if (!be.register_voice(up, err)) {
+        tts_json_error(res, 400, "invalid_request_error", err.empty() ? "voice registration failed" : err.c_str());
+        return;
+    }
+    std::string body = "{\"name\":\"" + up.name + "\",\"status\":\"registered\"}";
+    res.set_content(body, "application/json");
+}
+
+static void tts_handle_voice_delete(const tts_backend &      be,
+                                    const httplib::Request & http_req,
+                                    httplib::Response &      res) {
+    if (!be.remove_voice) {
+        tts_json_error(res, 501, "not_implemented", "this backend has no voice registry");
+        return;
+    }
+    const std::string name = http_req.matches[1];
+    if (!be.remove_voice(name)) {
+        tts_json_error(res, 404, "not_found_error", "no registered voice with this name");
+        return;
+    }
+    res.set_content("{\"status\":\"deleted\"}", "application/json");
+}
+
 static void tts_handle_models(const tts_backend & be, const httplib::Request &, httplib::Response & res) {
     yyjson_mut_doc * doc  = yyjson_mut_doc_new(NULL);
     yyjson_mut_val * root = yyjson_mut_obj(doc);
@@ -243,7 +393,16 @@ static void tts_handle_voices(const tts_backend & be, const httplib::Request &, 
     for (const std::string & v : be.voices) {
         yyjson_mut_val * one = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, one, "name", v.c_str());
+        yyjson_mut_obj_add_str(doc, one, "kind", "speaker");
         yyjson_mut_arr_add_val(arr, one);
+    }
+    if (be.registered_voices) {
+        for (const std::string & v : be.registered_voices()) {
+            yyjson_mut_val * one = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_val(doc, one, "name", yyjson_mut_strcpy(doc, v.c_str()));
+            yyjson_mut_obj_add_str(doc, one, "kind", "registered");
+            yyjson_mut_arr_add_val(arr, one);
+        }
     }
     yyjson_mut_obj_add_val(doc, root, "voices", arr);
     char * json = yyjson_mut_write(doc, 0, NULL);
@@ -294,7 +453,7 @@ static int tts_server_run(const tts_backend & be, const server_config & cfg) {
         { "Access-Control-Allow-Origin", "*" }
     });
     svr.Options("/.*", [](const httplib::Request &, httplib::Response & res) {
-        res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type");
     });
 
@@ -304,6 +463,10 @@ static int tts_server_run(const tts_backend & be, const server_config & cfg) {
             [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_models(be, req, res); });
     svr.Get("/v1/voices",
             [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_voices(be, req, res); });
+    svr.Post("/v1/voices",
+             [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_voice_register(be, req, res); });
+    svr.Delete(R"(/v1/voices/(.+))",
+               [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_voice_delete(be, req, res); });
     svr.Get("/health", tts_handle_health);
 
     signal(SIGINT, tts_on_signal);

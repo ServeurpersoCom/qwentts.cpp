@@ -13,8 +13,9 @@ runs on CPU, CUDA, Metal, Vulkan.
   in-context with a matching transcript
 - Voice design from a free text attribute instruction (gender, age,
   pitch, style)
-- Streaming synthesis : autoregressive frame loop with chunked codec
-  decode over a rolling left context, low latency chunk callback API
+- Streaming synthesis : stateful frame-by-frame codec decode, the first
+  audio callback fires one frame after the first Talker step and the
+  output matches the offline full decode exactly
 - Two stage generation : the Talker LM emits the semantic codebook, a
   code predictor MTP head emits the 15 acoustic codes per frame, both
   KV cached
@@ -22,8 +23,9 @@ runs on CPU, CUDA, Metal, Vulkan.
   (repetition penalty -> temperature -> top-k -> top-p -> multinomial)
 - Q8_0 and Q4_K_M quantisation of the Qwen3 talker backbone (0.6B and
   1.7B), the RVQ codec paths kept at F32
-- Two CLI tools : `qwen-tts` (text -> WAV) and `qwen-codec`
-  (WAV <-> RVQ codes)
+- Three tools : `qwen-tts` (text -> WAV), `qwen-codec`
+  (WAV <-> RVQ codes) and `tts-server` (OpenAI-compatible HTTP server
+  with a cloned voice registry)
 
 ## Build
 
@@ -119,6 +121,25 @@ Voice design (`tts.sh`, VoiceDesign, attribute instruction) :
     --codec models/qwen-tokenizer-12hz-Q8_0.gguf \
     --instruct "male, young adult, moderate pitch" \
     --lang English -o out.wav < prompt.txt
+```
+
+OpenAI-compatible server (`tts-server`) : `response_format` "pcm"
+streams s16le as it is generated, "wav" returns a one-shot file. Cloned
+voices register once over HTTP (a WAV extracted server side, or the
+`.spk` / `.rvq` latents from `qwen-codec`), then any OAI client selects
+them by name :
+
+```
+./build/tts-server \
+    --model models/qwen-talker-1.7b-base-Q8_0.gguf \
+    --codec models/qwen-tokenizer-12hz-Q8_0.gguf --port 8080
+
+curl -X POST localhost:8080/v1/voices -H "Content-Type: application/json" \
+    -d "{\"name\":\"freeman\",\"ref_text\":\"$(cat ref.txt)\",
+         \"spk_b64\":\"$(base64 -w0 ref.spk)\",\"rvq_b64\":\"$(base64 -w0 ref.rvq)\"}"
+
+curl -X POST localhost:8080/v1/audio/speech -H "Content-Type: application/json" \
+    -d '{"input":"Hello world.","voice":"freeman","response_format":"wav"}' -o out.wav
 ```
 
 ## Embedding the library
