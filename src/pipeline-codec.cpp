@@ -78,6 +78,16 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
     // stays on disk until the first encode request.
     pc->enc_loaded = false;
 
+    if (!graph_arena_init(&pc->dec_arena, 4096)) {
+        wctx_free(&pc->pre_conv_wctx);
+        dac_decoder_free(&pc->dac);
+        upsample_stage_free(&pc->upsample);
+        tok_trans_free(&pc->transformer);
+        quant_decoder_free(&pc->qdec);
+        gf_close(&pc->gguf);
+        return false;
+    }
+
     pc->sched = backend_sched_new(bp, 4096);
 
     qt_log(QT_LOG_INFO, "[Pipeline] Ready: hop %d samples @ %d Hz mono, %d codebooks @ 12.5 Hz", TOKENIZER_HOP_LENGTH,
@@ -95,18 +105,13 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
         return {};
     }
 
-    // Per-call graph context: tensor descriptors only, allocation is
-    // delegated to the scheduler.
-    const int    n_max_nodes = 4096;
-    const size_t graph_ctx_size =
-        ggml_tensor_overhead() * (size_t) n_max_nodes + ggml_graph_overhead_custom((size_t) n_max_nodes, false);
-
-    struct ggml_init_params gp   = { graph_ctx_size, NULL, /*no_alloc=*/true };
-    struct ggml_context *   gctx = ggml_init(gp);
-    if (!gctx) {
-        qt_log(QT_LOG_ERROR, "[Pipeline] ggml_init failed for graph ctx");
-        return {};
-    }
+    // Persistent arena: identical slice widths rebuild every node at
+    // the same address with identical shapes, so the backend CUDA graph
+    // cache replays the captured executable without an update. Steady
+    // state streaming decodes constant size slices and hits this path
+    // on every emit.
+    const int             n_max_nodes = 4096;
+    struct ggml_context * gctx        = graph_arena_begin(&pc->dec_arena);
 
     // Inputs: codes [T, K] i32, positions [T] i32, mask [T, T] f32.
     struct ggml_tensor * codes_in = ggml_new_tensor_2d(gctx, GGML_TYPE_I32, T, K);
@@ -139,10 +144,10 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
     struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
     ggml_build_forward_expand(graph, h);
 
+    ggml_backend_sched_reset(pc->sched);
     if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
         qt_log(QT_LOG_ERROR, "[Pipeline] sched_alloc_graph failed");
         ggml_backend_sched_reset(pc->sched);
-        ggml_free(gctx);
         return {};
     }
 
@@ -162,17 +167,14 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
     if (st != GGML_STATUS_SUCCESS) {
         qt_log(QT_LOG_ERROR, "[Pipeline] graph_compute status=%d", (int) st);
         ggml_backend_sched_reset(pc->sched);
-        ggml_free(gctx);
         return {};
     }
 
-    // Fetch audio output
+    // Fetch audio output. The arena and the sched allocation persist
+    // into the next decode.
     const int          n_samples = T * TOKENIZER_HOP_LENGTH;
     std::vector<float> audio((size_t) n_samples);
     ggml_backend_tensor_get(h, audio.data(), 0, (size_t) n_samples * sizeof(float));
-
-    ggml_backend_sched_reset(pc->sched);
-    ggml_free(gctx);
     return audio;
 }
 
@@ -427,6 +429,7 @@ void pipeline_codec_free(PipelineCodec * pc) {
         ggml_backend_sched_free(pc->sched);
         pc->sched = NULL;
     }
+    graph_arena_free(&pc->dec_arena);
     if (pc->enc_loaded) {
         quant_encode_free(&pc->qenc);
         enc_down_free(&pc->enc_downsample);

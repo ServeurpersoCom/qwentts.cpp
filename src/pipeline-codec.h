@@ -30,6 +30,7 @@
 #include "encoder-transformer.h"
 #include "ggml-backend.h"
 #include "gguf-weights.h"
+#include "graph-arena.h"
 #include "quantizer-decode.h"
 #include "quantizer-encode.h"
 #include "seanet-encoder.h"
@@ -69,6 +70,11 @@ struct PipelineCodec {
     // from pre encoded reference codes never pays for them.
     bool                enc_loaded;
     QwenQuantizerEncode qenc;
+
+    // Persistent graph arena for pipeline_codec_decode: stable node
+    // addresses across rebuilds keep the backend CUDA graph cache hot,
+    // so constant size streaming slices replay a captured executable.
+    GraphArena dec_arena;
 
     // CPU mirror of the RVQ encode side, lazy-loaded on first encode call.
     QwenQuantizerEncodeHost qenc_sem_host;
