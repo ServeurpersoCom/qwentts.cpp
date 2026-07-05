@@ -354,6 +354,15 @@ readback skipped, matching the upstream reference-plus-generated
 decode; the transformer receptive field (8 layers x window 72) exceeds
 any reference length, so the full prime is the exact one.
 
+The primed state feeds a per-reference snapshot LRU
+(`CODEC_SNAP_SLOTS`): after a fresh prime the conv contexts, KV ring,
+and position copy device to device into a slot keyed by the FNV-1a
+hash of the reference codes, and a later request with the same
+reference restores the exact state in one pass of tensor copies
+instead of re-decoding every reference frame. Slots allocate lazily
+and evict least recently used, so the priming cost amortizes across
+repeated cloned-voice requests without any registry coupling.
+
 ## Inference pipeline
 
 ### Prompt assembly

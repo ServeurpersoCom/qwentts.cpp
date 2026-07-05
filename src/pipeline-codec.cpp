@@ -31,6 +31,10 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
     pc->stream_graph_ctx = NULL;
     pc->stream_gf        = NULL;
     pc->stream_galloc    = NULL;
+    for (int i = 0; i < CODEC_SNAP_SLOTS; i++) {
+        pc->snaps[i] = {};
+    }
+    pc->snap_stamp = 0;
 
     if (!gf_load(&pc->gguf, gguf_path)) {
         qt_log(QT_LOG_ERROR, "[Pipeline] failed to load %s", gguf_path);
@@ -363,6 +367,109 @@ bool pipeline_codec_stream_reset(PipelineCodec * pc) {
     return true;
 }
 
+// FNV-1a 64 over the raw code bytes with T folded in, so a reference
+// sharing a prefix with a longer one cannot alias its key.
+uint64_t pipeline_codec_ref_key(const int32_t * codes, int K, int T) {
+    const uint8_t * p = (const uint8_t *) codes;
+    const size_t    n = (size_t) K * (size_t) T * sizeof(int32_t);
+    uint64_t        h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; i++) {
+        h = (h ^ p[i]) * 1099511628211ULL;
+    }
+    return (h ^ (uint64_t) T) * 1099511628211ULL;
+}
+
+// Allocate the mirror tensors of a snapshot slot: one duplicate per
+// stream state and KV ring tensor. Creation order is preserved so the
+// copy walker pairs source and mirror positionally.
+static bool codec_snap_ensure(PipelineCodec * pc, CodecStateSnap * s) {
+    if (s->ctx) {
+        return true;
+    }
+    int n = 0;
+    for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_ctx); t;
+         t                      = ggml_get_next_tensor(pc->stream_ctx, t)) {
+        n++;
+    }
+    for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_kv.ctx); t;
+         t                      = ggml_get_next_tensor(pc->stream_kv.ctx, t)) {
+        n++;
+    }
+    struct ggml_init_params gp = { ggml_tensor_overhead() * (size_t) n, NULL, true };
+    s->ctx                     = ggml_init(gp);
+    if (!s->ctx) {
+        qt_log(QT_LOG_ERROR, "[Pipeline] snapshot ggml_init failed");
+        return false;
+    }
+    for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_ctx); t;
+         t                      = ggml_get_next_tensor(pc->stream_ctx, t)) {
+        ggml_dup_tensor(s->ctx, t);
+    }
+    for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_kv.ctx); t;
+         t                      = ggml_get_next_tensor(pc->stream_kv.ctx, t)) {
+        ggml_dup_tensor(s->ctx, t);
+    }
+    s->buf = ggml_backend_alloc_ctx_tensors(s->ctx, pc->backend);
+    if (!s->buf) {
+        qt_log(QT_LOG_ERROR, "[Pipeline] snapshot backend allocation failed");
+        ggml_free(s->ctx);
+        s->ctx = NULL;
+        return false;
+    }
+    return true;
+}
+
+// Copy every stream state and KV ring tensor to (save) or from its
+// slot mirror, device to device on a shared backend.
+static void codec_snap_copy(PipelineCodec * pc, CodecStateSnap * s, bool save) {
+    struct ggml_tensor * m = ggml_get_first_tensor(s->ctx);
+    for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_ctx); t;
+         t = ggml_get_next_tensor(pc->stream_ctx, t), m = ggml_get_next_tensor(s->ctx, m)) {
+        ggml_backend_tensor_copy(save ? t : m, save ? m : t);
+    }
+    for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_kv.ctx); t;
+         t = ggml_get_next_tensor(pc->stream_kv.ctx, t), m = ggml_get_next_tensor(s->ctx, m)) {
+        ggml_backend_tensor_copy(save ? t : m, save ? m : t);
+    }
+}
+
+bool pipeline_codec_stream_restore(PipelineCodec * pc, uint64_t key) {
+    if (!pc->stream_ready) {
+        return false;
+    }
+    for (int i = 0; i < CODEC_SNAP_SLOTS; i++) {
+        CodecStateSnap * s = &pc->snaps[i];
+        if (s->stamp == 0 || s->key != key) {
+            continue;
+        }
+        Timer t;
+        codec_snap_copy(pc, s, false);
+        pc->stream_pos = s->pos;
+        s->stamp       = ++pc->snap_stamp;
+        qt_log(QT_LOG_INFO, "[Pipeline] Codec state restored from snapshot in %.1f ms (%d frames)", t.ms(), s->pos);
+        return true;
+    }
+    return false;
+}
+
+bool pipeline_codec_stream_snapshot(PipelineCodec * pc, uint64_t key) {
+    CodecStateSnap * lru = &pc->snaps[0];
+    for (int i = 1; i < CODEC_SNAP_SLOTS; i++) {
+        if (pc->snaps[i].stamp < lru->stamp) {
+            lru = &pc->snaps[i];
+        }
+    }
+    if (!codec_snap_ensure(pc, lru)) {
+        return false;
+    }
+    codec_snap_copy(pc, lru, true);
+    lru->key   = key;
+    lru->pos   = pc->stream_pos;
+    lru->stamp = ++pc->snap_stamp;
+    qt_log(QT_LOG_INFO, "[Pipeline] Codec state snapshot saved (%d frames)", lru->pos);
+    return true;
+}
+
 bool pipeline_codec_decode_stream(PipelineCodec * pc, const int32_t * codes, float * audio_out) {
     const int K    = TOKENIZER_NUM_CODEBOOKS;
     const int ring = CODEC_STREAM_RING;
@@ -660,6 +767,17 @@ void pipeline_codec_free(PipelineCodec * pc) {
         pc->stream_ctx   = NULL;
         pc->stream_ready = false;
     }
+    for (int i = 0; i < CODEC_SNAP_SLOTS; i++) {
+        CodecStateSnap * s = &pc->snaps[i];
+        if (s->buf) {
+            ggml_backend_buffer_free(s->buf);
+        }
+        if (s->ctx) {
+            ggml_free(s->ctx);
+        }
+        *s = {};
+    }
+    pc->snap_stamp = 0;
     if (pc->enc_loaded) {
         quant_encode_free(&pc->qenc);
         enc_down_free(&pc->enc_downsample);

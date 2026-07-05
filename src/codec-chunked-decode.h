@@ -112,9 +112,15 @@ struct codec_stream_decoder {
     // Prime the codec state with the full ICL reference: every frame
     // runs through the streaming decode with the audio discarded, so
     // the first generated frame sees the reference's exact causal
-    // state. ref_kt is K major [K, ref_T]. Call once, after init and
-    // before any push_frame.
+    // state. A reference already primed restores its snapshot device
+    // to device instead of re-decoding; a fresh one saves its primed
+    // state into the LRU. ref_kt is K major [K, ref_T]. Call once,
+    // after init and before any push_frame.
     bool seed_reference(PipelineCodec * pc, const int32_t * ref_kt, int ref_T) {
+        const uint64_t key = pipeline_codec_ref_key(ref_kt, K, ref_T);
+        if (pipeline_codec_stream_restore(pc, key)) {
+            return true;
+        }
         std::vector<int32_t> codes((size_t) K);
         for (int t = 0; t < ref_T; t++) {
             for (int k = 0; k < K; k++) {
@@ -124,7 +130,7 @@ struct codec_stream_decoder {
                 return false;
             }
         }
-        return true;
+        return pipeline_codec_stream_snapshot(pc, key);
     }
 
     // Decode one frame (K int32 codes, one per codebook) and emit its

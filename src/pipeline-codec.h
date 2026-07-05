@@ -46,6 +46,22 @@
 #define TOKENIZER_NUM_CODEBOOKS 16
 #define TOKENIZER_CODE_BITS     11
 
+// Primed stream state snapshots kept per reference, LRU evicted.
+static const int CODEC_SNAP_SLOTS = 8;
+
+// One primed stream state snapshot: a mirror of every conv context and
+// KV ring tensor in a single backend buffer, plus the host position
+// cursor. key is the content hash of the reference codes, stamp orders
+// the slots for LRU eviction, stamp zero marks an empty slot. Mirrors
+// allocate lazily on the slot's first save.
+struct CodecStateSnap {
+    uint64_t              key;
+    uint64_t              stamp;
+    int                   pos;
+    struct ggml_context * ctx;
+    ggml_backend_buffer_t buf;
+};
+
 struct PipelineCodec {
     GGUFModel gguf;
 
@@ -105,6 +121,14 @@ struct PipelineCodec {
     struct ggml_tensor *  stream_in_mask;
     struct ggml_tensor *  stream_out;
 
+    // Snapshot LRU over the stream state: after an ICL reference
+    // priming the conv contexts, KV ring, and position copy device to
+    // device into the slot keyed by the reference content hash, so a
+    // repeated reference restores in one pass of tensor copies instead
+    // of re-decoding every reference frame.
+    CodecStateSnap snaps[CODEC_SNAP_SLOTS];
+    uint64_t       snap_stamp;
+
     // CPU mirror of the RVQ encode side, lazy-loaded on first encode call.
     QwenQuantizerEncodeHost qenc_sem_host;
     QwenQuantizerEncodeHost qenc_aco_host;
@@ -140,6 +164,18 @@ bool pipeline_codec_stream_reset(PipelineCodec * pc);
 // TOKENIZER_HOP_LENGTH samples copy into it; a NULL audio_out primes
 // the state without a readback (ICL reference priming).
 bool pipeline_codec_decode_stream(PipelineCodec * pc, const int32_t * codes, float * audio_out);
+
+// Content hash of an ICL reference, the snapshot LRU key.
+//   codes: flat int32, [K, T] row-major.
+uint64_t pipeline_codec_ref_key(const int32_t * codes, int K, int T);
+
+// Restore the stream state from the snapshot slot matching key.
+// Returns false on a miss; the caller then primes and snapshots.
+bool pipeline_codec_stream_restore(PipelineCodec * pc, uint64_t key);
+
+// Save the current stream state into the LRU slot for key, evicting
+// the least recently used slot when all are taken.
+bool pipeline_codec_stream_snapshot(PipelineCodec * pc, uint64_t key);
 
 // Encode a 24 kHz mono waveform into RVQ codes.
 //   audio    : [n_samples] f32 mono 24 kHz. Must be a multiple of
