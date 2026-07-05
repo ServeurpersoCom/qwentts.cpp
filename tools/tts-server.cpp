@@ -7,6 +7,7 @@
 
 #include "qwen.h"
 #include "version.h"
+#include "utf8.h"
 
 #include <cstdio>
 #include <cstring>
@@ -23,9 +24,35 @@ static void print_usage(const char * prog) {
             "  --host <ip>             Listen address (default: 127.0.0.1)\n"
             "  --port <n>              Listen port (default: 8080)\n"
             "  --lang <name>           Language label (default: auto)\n"
+            "  --ref-spk <path>        Pre-extracted speaker embedding from qwen-codec --talker (Base only)\n"
             "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n",
             prog);
+}
+
+// Read a .spk file: raw f32 values, the count IS the embedding dimension.
+static bool read_spk_file(const char * path, std::vector<float> & emb) {
+    FILE * f = utf8_fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "[CLI] ERROR: cannot open --ref-spk '%s'\n", path);
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || (sz % (long) sizeof(float)) != 0) {
+        fprintf(stderr, "[CLI] ERROR: --ref-spk '%s' size %ld is not a positive multiple of 4\n", path, sz);
+        fclose(f);
+        return false;
+    }
+    emb.resize((size_t) sz / sizeof(float));
+    if (fread(emb.data(), sizeof(float), emb.size(), f) != emb.size()) {
+        fprintf(stderr, "[CLI] ERROR: short read on --ref-spk '%s'\n", path);
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+    return true;
 }
 
 // Trim a path down to its file name for the reported model id.
@@ -36,9 +63,11 @@ static std::string basename_of(const char * path) {
 }
 
 int main(int argc, char ** argv) {
+    typedef std::map<std::string, std::vector<float>> spk_map;
     const char *  talker_path = NULL;
     const char *  codec_path  = NULL;
     std::string   lang        = "auto";
+    spk_map       spks;
     server_config cfg;
     bool          use_fa     = true;
     bool          clamp_fp16 = false;
@@ -55,6 +84,8 @@ int main(int argc, char ** argv) {
             cfg.port = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--lang") && i + 1 < argc) {
             lang = argv[++i];
+        } else if (!std::strcmp(arg, "--ref-spk") && i + 1 < argc) {
+            spks[argv[++i]] = std::vector<float>();
         } else if (!std::strcmp(arg, "--no-fa")) {
             use_fa = false;
         } else if (!std::strcmp(arg, "--clamp-fp16")) {
@@ -72,6 +103,12 @@ int main(int argc, char ** argv) {
     if (!talker_path || !codec_path) {
         print_usage(argv[0]);
         return 0;
+    }
+
+    for (spk_map::iterator i = spks.begin(); i != spks.end(); ++i) {
+        if (!read_spk_file(i->first.c_str(), i->second)) {
+            return 1;
+        }
     }
 
     struct qt_init_params iparams;
@@ -93,17 +130,26 @@ int main(int argc, char ** argv) {
     for (int i = 0; i < n; i++) {
         be.voices.push_back(qt_speaker_name(q, i));
     }
+    for (spk_map::iterator i = spks.begin(); i != spks.end(); ++i) {
+        be.voices.push_back(i->first.c_str());
+    }
 
     // The adapter always drives the streaming pipeline : on_chunk routes to
     // the shared sink, which either streams to the socket (pcm) or fills a
     // one-shot buffer (wav). Either way the audio path is identical.
-    be.synthesize = [q, &lang](const tts_request & req, const tts_sink & sink, std::string & err) -> int {
+    be.synthesize = [q, &lang, &spks](const tts_request & req, const tts_sink & sink, std::string & err) -> int {
         struct qt_tts_params p;
         qt_tts_default_params(&p);
         p.text = req.input.c_str();
         p.lang = lang.c_str();
-        if (!req.voice.empty() && qt_n_speakers(q) > 0) {
-            p.speaker = req.voice.c_str();
+        if (!req.voice.empty()) {
+            if (spks.find(req.voice) != spks.end()) {
+                std::vector<float> &ref_spk_emb = spks[req.voice];
+                p.ref_spk_emb = ref_spk_emb.empty() ? NULL : ref_spk_emb.data();
+                p.ref_spk_dim = (int) ref_spk_emb.size();
+            } else if (qt_n_speakers(q) > 0) {
+                p.speaker = req.voice.c_str();
+            }
         }
         if (!req.instructions.empty()) {
             p.instruct = req.instructions.c_str();
