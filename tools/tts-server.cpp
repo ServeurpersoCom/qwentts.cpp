@@ -196,12 +196,14 @@ int main(int argc, char ** argv) {
         return names;
     };
 
-    // The adapter always drives the streaming pipeline : on_chunk routes to
-    // the shared sink, which either streams to the socket (pcm) or fills a
-    // one-shot buffer (wav). Either way the audio path is identical. A
-    // registered voice wins over a model speaker of the same name and
-    // injects the pre-extracted reference latents. A name matching
-    // neither is rejected instead of silently generating voiceless.
+    // pcm drives the streaming pipeline : on_chunk routes each decoded
+    // frame to the shared sink for lowest latency. wav leaves on_chunk
+    // unset so the pipeline runs the buffered chunked codec path (batch
+    // decode, talker uninterrupted) and the whole utterance pushes to
+    // the sink once. A registered voice wins over a model speaker of
+    // the same name and injects the pre-extracted reference latents. A
+    // name matching neither is rejected instead of silently generating
+    // voiceless.
     be.synthesize = [q, &lang](const tts_request & req, const tts_sink & sink, std::string & err) -> int {
         struct qt_tts_params p;
         qt_tts_default_params(&p);
@@ -259,13 +261,18 @@ int main(int argc, char ** argv) {
 
         // Trampoline : the C ABI on_chunk forwards to the C++ sink.
         const tts_sink * sink_ptr = &sink;
-        p.on_chunk                = [](const float * s, int ns, void * u) -> bool {
-            return (*static_cast<const tts_sink *>(u))(s, ns);
-        };
-        p.on_chunk_user_data = (void *) sink_ptr;
+        if (req.format == "pcm") {
+            p.on_chunk = [](const float * s, int ns, void * u) -> bool {
+                return (*static_cast<const tts_sink *>(u))(s, ns);
+            };
+            p.on_chunk_user_data = (void *) sink_ptr;
+        }
 
         struct qt_audio out = {};
         enum qt_status  rc  = qt_synthesize(q, &p, &out);
+        if (rc == QT_STATUS_OK && p.on_chunk == NULL && out.n_samples > 0) {
+            sink(out.samples, out.n_samples);
+        }
         qt_audio_free(&out);
         if (rc != QT_STATUS_OK) {
             err = qt_last_error();

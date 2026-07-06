@@ -11,6 +11,7 @@
 // directly so the facade in qwen.cpp stays a thin wrapper.
 
 #include "backend.h"
+#include "code-predictor-graph.h"
 #include "code-predictor-weights.h"
 #include "ggml-backend.h"
 #include "gguf-weights.h"
@@ -140,15 +141,15 @@ struct PipelineTTS {
     ggml_backend_buffer_t bridge_buf;
     struct ggml_tensor *  hidden_bridge;
 
-    // Persistent graph arenas, one per graph shape class. Stable node
-    // addresses across rebuilds keep the backend CUDA graph cache hot:
-    // the talker shares one arena for prefill and decode, the predictor
-    // splits prefill (T=2) from the steps, with one arena per sub step
-    // g so each graph keeps a fixed lm_head and embedding table and the
-    // captured executable replays without an update.
-    GraphArena              talker_arena;
-    GraphArena              cp_prefill_arena;
-    std::vector<GraphArena> cp_step_arenas;
+    // Persistent graph arena for the talker: stable node addresses
+    // across rebuilds keep the backend CUDA graph cache hot for its
+    // prefill and decode flavors. The predictor runs on static graphs
+    // instead: one prefill (T=2) plus one per acoustic step, each with
+    // a fixed lm_head and embedding table, built once at load and
+    // replayed with a 4 byte id upload per call.
+    GraphArena                 talker_arena;
+    CodePredGraph              cp_prefill_graph;
+    std::vector<CodePredGraph> cp_step_graphs;
 };
 
 // Open the talker GGUF and the codec GGUF, load every module on the

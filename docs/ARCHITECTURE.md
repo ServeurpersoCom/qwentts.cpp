@@ -603,8 +603,11 @@ The `.rvq` container packs the 16 codes per frame at 11 bits LSB-first.
 OpenAI-compatible HTTP server over the public ABI, one GPU-resident
 context, synthesis serialized FIFO across connections. The shared HTTP
 core lives in `src/tts-server.h` (also consumed by the sibling *.cpp
-ports); `tools/tts-server.cpp` wires the `qt_*` ABI into it. Verbatim
-`--help` :
+ports); `tools/tts-server.cpp` wires the `qt_*` ABI into it.
+response_format selects the codec path : pcm drives the stateful
+streaming decode frame by frame for lowest latency, wav runs the
+buffered chunked decode (batch codec, talker uninterrupted) for best
+throughput. Verbatim `--help` :
 
 ```
 Usage: ./build/tts-server --model <gguf> --codec <gguf> [options]
