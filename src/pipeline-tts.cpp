@@ -269,6 +269,7 @@ bool pipeline_tts_load(PipelineTTS * pt,
         graph_arena_init(&pt->talker_arena, talker_graph_max_nodes(pt->talker.num_hidden_layers)) &&
         code_predictor_graph_build(&pt->code_predictor, &pt->code_predictor_kv, pt->backend, pt->talker.codec_embedding,
                                    pt->hidden_bridge, 0, pt->use_flash_attn, pt->clamp_fp16, &pt->cp_prefill_graph);
+    pt->talker_decode_graphs.resize(((size_t) pt->talker_kv.max_seq_len + 255) / 256);
     pt->cp_step_graphs.resize((size_t) (pt->num_code_groups - 2));
     for (size_t g = 0; graphs_ok && g < pt->cp_step_graphs.size(); g++) {
         graphs_ok = code_predictor_graph_build(&pt->code_predictor, &pt->code_predictor_kv, pt->backend,
@@ -280,6 +281,7 @@ bool pipeline_tts_load(PipelineTTS * pt,
             code_predictor_graph_free(&pt->cp_step_graphs[g]);
         }
         code_predictor_graph_free(&pt->cp_prefill_graph);
+        pt->talker_decode_graphs.clear();
         graph_arena_free(&pt->talker_arena);
         ggml_backend_buffer_free(pt->bridge_buf);
         pt->bridge_buf = NULL;
@@ -312,6 +314,10 @@ void pipeline_tts_free(PipelineTTS * pt) {
     }
     pt->cp_step_graphs.clear();
     code_predictor_graph_free(&pt->cp_prefill_graph);
+    for (size_t g = 0; g < pt->talker_decode_graphs.size(); g++) {
+        talker_decode_graph_free(&pt->talker_decode_graphs[g]);
+    }
+    pt->talker_decode_graphs.clear();
     graph_arena_free(&pt->talker_arena);
     if (pt->bridge_buf) {
         ggml_backend_buffer_free(pt->bridge_buf);
@@ -679,8 +685,8 @@ qt_status pipeline_tts_synthesize(PipelineTTS *                pt,
             ok = talker_forward_prefill(&pt->talker, &pt->talker_kv, pt->sched, &pt->talker_arena, pt->hidden_bridge,
                                         prompt.input_embed.data(), prompt.T_ctx, use_fa, clamp_fp16, step_dump, &fw);
         } else {
-            ok = talker_forward_decode(&pt->talker, &pt->talker_kv, pt->sched, &pt->talker_arena, pt->hidden_bridge,
-                                       prev_ids.data(), pt->code_predictor.codec_embedding.data(),
+            ok = talker_forward_decode(&pt->talker, &pt->talker_kv, pt->backend, pt->talker_decode_graphs.data(),
+                                       pt->hidden_bridge, prev_ids.data(), pt->code_predictor.codec_embedding.data(),
                                        pt->code_predictor.num_acoustic_codebooks, prev_overlay, use_fa, clamp_fp16,
                                        params->dump_dir != NULL, &fw);
         }

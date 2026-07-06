@@ -42,6 +42,7 @@
 #include "ggml.h"
 #include "graph-arena.h"
 #include "kv-cache.h"
+#include "talker-decode-graph.h"
 #include "talker-weights.h"
 
 #include <cmath>
@@ -250,35 +251,29 @@ static struct ggml_tensor * talker_layer_forward(struct ggml_context * ctx,
     return x;
 }
 
-// Shared core that builds the graph, allocates, uploads inputs, runs
-// it and pulls out the last position logits. T tokens are appended to
-// the cache starting at n_past. Input is either a raw embedding upload
-// (input_embed, prefill) or the previous frame code ids plus overlay
-// row assembled in graph (frame_ids, decode hot path). The last
-// position hidden copies in graph into the caller owned persistent
-// hidden_bridge tensor the code predictor prefill reads on device; the
-// host copy in out->hidden_last fills only under read_hidden_host.
-// When n_past == 0 and dump_dir is set, the bisect taps fire on the
-// prefill path. use_fa / clamp_fp16 are forwarded as is to every
-// layer. The graph metadata lives in the caller owned persistent
-// arena.
-static bool talker_forward_core(const TalkerWeights *        tw,
-                                KVCache *                    kv,
-                                ggml_backend_sched_t         sched,
-                                GraphArena *                 arena,
-                                struct ggml_tensor *         hidden_bridge,
-                                const float *                input_embed,
-                                const int32_t *              frame_ids,
-                                struct ggml_tensor * const * acoustic_embd,
-                                int                          n_acoustic,
-                                const float *                overlay,
-                                int                          T,
-                                int                          n_past,
-                                bool                         use_flash_attn,
-                                bool                         clamp_fp16,
-                                bool                         read_hidden_host,
-                                const char *                 dump_dir,
-                                TalkerForwardOutput *        out) {
+// Prefill core: builds the graph in the caller owned arena, allocates
+// through the sched, uploads the raw embedding, runs it and pulls out
+// the last position logits. T tokens are appended to the cache
+// starting at n_past. The last position hidden copies in graph into
+// the caller owned persistent hidden_bridge tensor the code predictor
+// prefill reads on device; the host copy in out->hidden_last fills
+// only under read_hidden_host. When n_past == 0 and dump_dir is set,
+// the bisect taps fire. use_fa / clamp_fp16 are forwarded as is to
+// every layer. The decode hot path runs on the static graphs below
+// instead.
+static bool talker_forward_core(const TalkerWeights * tw,
+                                KVCache *             kv,
+                                ggml_backend_sched_t  sched,
+                                GraphArena *          arena,
+                                struct ggml_tensor *  hidden_bridge,
+                                const float *         input_embed,
+                                int                   T,
+                                int                   n_past,
+                                bool                  use_flash_attn,
+                                bool                  clamp_fp16,
+                                bool                  read_hidden_host,
+                                const char *          dump_dir,
+                                TalkerForwardOutput * out) {
     const int hidden   = tw->hidden_size;
     const int n_layers = tw->num_hidden_layers;
     const int vocab    = tw->vocab_size;
@@ -310,33 +305,9 @@ static bool talker_forward_core(const TalkerWeights *        tw,
     ggml_set_name(rows_in, "kv_rows");
     ggml_set_input(rows_in);
 
-    // Input: either a raw embedding upload (prefill path) or, on the
-    // decode hot path, the frame codes of the previous step gathered
-    // and summed in graph. x = get_rows(codec_embd, ids[0]) plus the 15
-    // acoustic group gathers plus the trailing text / pad overlay row.
-    // The only per step uploads are 16 code ids and one overlay row.
-    struct ggml_tensor * x_in       = NULL;
-    struct ggml_tensor * ids_in     = NULL;
-    struct ggml_tensor * overlay_in = NULL;
-    if (frame_ids) {
-        ids_in = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, 1 + n_acoustic);
-        ggml_set_name(ids_in, "frame_code_ids");
-        ggml_set_input(ids_in);
-        overlay_in = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, hidden, 1);
-        ggml_set_name(overlay_in, "overlay_row");
-        ggml_set_input(overlay_in);
-
-        struct ggml_tensor * id0 = ggml_view_1d(gctx, ids_in, 1, 0);
-        x_in                     = ggml_get_rows(gctx, tw->codec_embedding, id0);
-        for (int g = 0; g < n_acoustic; g++) {
-            struct ggml_tensor * idg = ggml_view_1d(gctx, ids_in, 1, (size_t) (g + 1) * sizeof(int32_t));
-            x_in                     = ggml_add(gctx, x_in, ggml_get_rows(gctx, acoustic_embd[g], idg));
-        }
-        x_in = ggml_add(gctx, x_in, overlay_in);
-    } else {
-        x_in = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, hidden, T);
-        ggml_set_input(x_in);
-    }
+    // Input: the raw prefill embedding uploaded from host.
+    struct ggml_tensor * x_in = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, hidden, T);
+    ggml_set_input(x_in);
     ggml_set_name(x_in, "input_embed");
 
     struct ggml_cgraph * gf = ggml_new_graph_custom(gctx, max_nodes, false);
@@ -399,12 +370,7 @@ static bool talker_forward_core(const TalkerWeights *        tw,
     }
 
     // Upload input embedding (host [T, hidden] -> ggml [hidden, T]).
-    if (frame_ids) {
-        ggml_backend_tensor_set(ids_in, frame_ids, 0, (size_t) (1 + n_acoustic) * sizeof(int32_t));
-        ggml_backend_tensor_set(overlay_in, overlay, 0, (size_t) hidden * sizeof(float));
-    } else {
-        ggml_backend_tensor_set(x_in, input_embed, 0, (size_t) T * (size_t) hidden * sizeof(float));
-    }
+    ggml_backend_tensor_set(x_in, input_embed, 0, (size_t) T * (size_t) hidden * sizeof(float));
 
     // Positions: n_past .. n_past + T - 1
     {
@@ -511,21 +477,115 @@ static bool talker_forward_prefill(const TalkerWeights * tw,
         fprintf(stderr, "[TalkerForward] FATAL: prefill T=%d exceeds cache max_seq_len=%d\n", T, kv->max_seq_len);
         return false;
     }
-    return talker_forward_core(tw, kv, sched, arena, hidden_bridge, input_embed, NULL, NULL, 0, NULL, T, 0,
-                               use_flash_attn, clamp_fp16, dump_dir != NULL, dump_dir, out);
+    return talker_forward_core(tw, kv, sched, arena, hidden_bridge, input_embed, T, 0, use_flash_attn, clamp_fp16,
+                               dump_dir != NULL, dump_dir, out);
 }
 
-// Decode: feed exactly one embedding and append one position to the
-// cache. Reads positions [0, kv->cur_len + 1). Caller is responsible
-// for ensuring kv->cur_len + 1 <= kv->max_seq_len.
-// Append one position from the previous frame's codes. frame_ids holds
-// [c0, c1..c15], acoustic_embd the 15 group tables owned by the code
-// predictor, overlay the trailing text / pad row summed on top. The
-// input embedding assembles entirely in graph.
+// Build one static decode graph for the given attention window. The
+// previous frame code ids gather and sum in graph with the overlay
+// row on top; the last position hidden copies into hidden_bridge and
+// the codec head logits are the single output row. Positions, kv row,
+// and mask stay plain inputs re-uploaded before every replay since
+// n_past moves each step.
+static bool talker_decode_graph_build(const TalkerWeights *        tw,
+                                      KVCache *                    kv,
+                                      ggml_backend_t               backend,
+                                      struct ggml_tensor *         hidden_bridge,
+                                      struct ggml_tensor * const * acoustic_embd,
+                                      int                          n_acoustic,
+                                      int                          n_kv_pad,
+                                      bool                         use_flash_attn,
+                                      bool                         clamp_fp16,
+                                      TalkerDecodeGraph *          tg) {
+    const int hidden   = tw->hidden_size;
+    const int n_layers = tw->num_hidden_layers;
+
+    const int    max_nodes = talker_graph_max_nodes(n_layers);
+    const size_t bytes =
+        ggml_tensor_overhead() * (size_t) max_nodes + ggml_graph_overhead_custom((size_t) max_nodes, false);
+    struct ggml_init_params gp = { bytes, NULL, true };
+    tg->ctx                    = ggml_init(gp);
+    if (!tg->ctx) {
+        fprintf(stderr, "[TalkerForward] FATAL: decode graph ctx allocation failed\n");
+        return false;
+    }
+    struct ggml_context * gctx = tg->ctx;
+
+    struct ggml_tensor * pos_in  = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, 1);
+    struct ggml_tensor * mask_in = ggml_new_tensor_2d(gctx, GGML_TYPE_F16, n_kv_pad, 1);
+    struct ggml_tensor * rows_in = ggml_new_tensor_1d(gctx, GGML_TYPE_I64, 1);
+    struct ggml_tensor * ids_in  = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, 1 + n_acoustic);
+    struct ggml_tensor * overlay = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, hidden, 1);
+    ggml_set_name(pos_in, "positions");
+    ggml_set_name(mask_in, "causal_mask");
+    ggml_set_name(rows_in, "kv_rows");
+    ggml_set_name(ids_in, "frame_code_ids");
+    ggml_set_name(overlay, "overlay_row");
+    ggml_set_input(pos_in);
+    ggml_set_input(mask_in);
+    ggml_set_input(rows_in);
+    ggml_set_input(ids_in);
+    ggml_set_input(overlay);
+
+    struct ggml_tensor * id0  = ggml_view_1d(gctx, ids_in, 1, 0);
+    struct ggml_tensor * x_in = ggml_get_rows(gctx, tw->codec_embedding, id0);
+    for (int g = 0; g < n_acoustic; g++) {
+        struct ggml_tensor * idg = ggml_view_1d(gctx, ids_in, 1, (size_t) (g + 1) * sizeof(int32_t));
+        x_in                     = ggml_add(gctx, x_in, ggml_get_rows(gctx, acoustic_embd[g], idg));
+    }
+    x_in = ggml_add(gctx, x_in, overlay);
+    ggml_set_name(x_in, "input_embed");
+
+    struct ggml_cgraph * gf = ggml_new_graph_custom(gctx, max_nodes, false);
+
+    struct ggml_tensor * h = x_in;
+    for (int l = 0; l < n_layers; l++) {
+        h = talker_layer_forward(gctx, tw, tw->layers[(size_t) l], h, pos_in, mask_in, rows_in, kv->k[(size_t) l],
+                                 kv->v[(size_t) l], 1, n_kv_pad, use_flash_attn, clamp_fp16, gf);
+    }
+
+    struct ggml_tensor * h_final = ggml_rms_norm(gctx, h, tw->rms_norm_eps);
+    h_final                      = ggml_mul(gctx, h_final, tw->norm_w);
+    ggml_set_name(h_final, "hidden_final");
+
+    struct ggml_tensor * h_last     = ggml_view_1d(gctx, h_final, hidden, 0);
+    struct ggml_tensor * bridge_cpy = ggml_cpy(gctx, h_last, hidden_bridge);
+
+    struct ggml_tensor * logits = ggml_mul_mat(gctx, tw->codec_head_w, h_final);
+    ggml_set_name(logits, "logits");
+    ggml_set_output(logits);
+    ggml_build_forward_expand(gf, logits);
+    ggml_build_forward_expand(gf, bridge_cpy);
+
+    tg->galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+    if (!tg->galloc || !ggml_gallocr_alloc_graph(tg->galloc, gf)) {
+        fprintf(stderr, "[TalkerForward] FATAL: decode graph allocation failed\n");
+        talker_decode_graph_free(tg);
+        return false;
+    }
+
+    tg->gf       = gf;
+    tg->ids_in   = ids_in;
+    tg->overlay  = overlay;
+    tg->pos_in   = pos_in;
+    tg->rows_in  = rows_in;
+    tg->mask_in  = mask_in;
+    tg->logits   = logits;
+    tg->n_kv_pad = n_kv_pad;
+    return true;
+}
+
+// Decode: append one position from the previous frame's codes over the
+// static graph of the current window class, built lazily on the first
+// step entering the span. frame_ids holds [c0, c1..c15], acoustic_embd
+// the 15 group tables owned by the code predictor, overlay the trailing
+// text / pad row summed on top. Reads positions [0, kv->cur_len + 1);
+// caller ensures kv->cur_len + 1 <= kv->max_seq_len holds by cache
+// sizing. read_hidden_host pulls the bridge back for dump paths.
 static bool talker_forward_decode(const TalkerWeights *        tw,
                                   KVCache *                    kv,
-                                  ggml_backend_sched_t         sched,
-                                  GraphArena *                 arena,
+                                  ggml_backend_t               backend,
+                                  TalkerDecodeGraph *          graphs,
                                   struct ggml_tensor *         hidden_bridge,
                                   const int32_t *              frame_ids,
                                   struct ggml_tensor * const * acoustic_embd,
@@ -540,6 +600,49 @@ static bool talker_forward_decode(const TalkerWeights *        tw,
                 kv->max_seq_len);
         return false;
     }
-    return talker_forward_core(tw, kv, sched, arena, hidden_bridge, NULL, frame_ids, acoustic_embd, n_acoustic, overlay,
-                               1, kv->cur_len, use_flash_attn, clamp_fp16, read_hidden_host, NULL, out);
+    const int n_past     = kv->cur_len;
+    const int kv_pad_raw = (int) GGML_PAD(n_past + 1, 256);
+    const int n_kv_pad   = kv_pad_raw < kv->max_seq_len ? kv_pad_raw : kv->max_seq_len;
+
+    TalkerDecodeGraph * tg = &graphs[(n_kv_pad + 255) / 256 - 1];
+    if (!tg->ctx && !talker_decode_graph_build(tw, kv, backend, hidden_bridge, acoustic_embd, n_acoustic, n_kv_pad,
+                                               use_flash_attn, clamp_fp16, tg)) {
+        return false;
+    }
+
+    ggml_backend_tensor_set(tg->ids_in, frame_ids, 0, (size_t) (1 + n_acoustic) * sizeof(int32_t));
+    ggml_backend_tensor_set(tg->overlay, overlay, 0, (size_t) tw->hidden_size * sizeof(float));
+
+    const int32_t pos = n_past;
+    ggml_backend_tensor_set(tg->pos_in, &pos, 0, sizeof(int32_t));
+    const int64_t row = (int64_t) n_past;
+    ggml_backend_tensor_set(tg->rows_in, &row, 0, sizeof(int64_t));
+
+    // Causal mask: keys [0, n_past] carry 0, the padded tail neg inf.
+    {
+        std::vector<ggml_fp16_t> mask((size_t) tg->n_kv_pad);
+        const ggml_fp16_t        zero    = ggml_fp32_to_fp16(0.0f);
+        const ggml_fp16_t        neg_inf = ggml_fp32_to_fp16(-INFINITY);
+        for (size_t i = 0; i < mask.size(); i++) {
+            mask[i] = (int) i <= n_past ? zero : neg_inf;
+        }
+        ggml_backend_tensor_set(tg->mask_in, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+    }
+
+    if (ggml_backend_graph_compute(backend, tg->gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "[TalkerForward] FATAL: decode graph compute failed\n");
+        return false;
+    }
+
+    out->hidden = tw->hidden_size;
+    out->vocab  = tw->vocab_size;
+    out->logits_last.assign((size_t) tw->vocab_size, 0.0f);
+    ggml_backend_tensor_get(tg->logits, out->logits_last.data(), 0, (size_t) tw->vocab_size * sizeof(float));
+    if (read_hidden_host) {
+        out->hidden_last.assign((size_t) tw->hidden_size, 0.0f);
+        ggml_backend_tensor_get(hidden_bridge, out->hidden_last.data(), 0, (size_t) tw->hidden_size * sizeof(float));
+    }
+
+    kv->cur_len = n_past + 1;
+    return true;
 }

@@ -20,6 +20,7 @@
 #include "pipeline-codec.h"
 #include "qwen.h"
 #include "speaker-encoder-weights.h"
+#include "talker-decode-graph.h"
 #include "talker-weights.h"
 
 #include <cstdint>
@@ -141,15 +142,16 @@ struct PipelineTTS {
     ggml_backend_buffer_t bridge_buf;
     struct ggml_tensor *  hidden_bridge;
 
-    // Persistent graph arena for the talker: stable node addresses
-    // across rebuilds keep the backend CUDA graph cache hot for its
-    // prefill and decode flavors. The predictor runs on static graphs
-    // instead: one prefill (T=2) plus one per acoustic step, each with
-    // a fixed lm_head and embedding table, built once at load and
-    // replayed with a 4 byte id upload per call.
-    GraphArena                 talker_arena;
-    CodePredGraph              cp_prefill_graph;
-    std::vector<CodePredGraph> cp_step_graphs;
+    // Persistent graph arena for the talker prefill (T_ctx varies per
+    // request, rebuilt through the sched). The talker decode and the
+    // whole predictor run on static graphs instead: the decode keeps
+    // one graph per attention window class built lazily, the predictor
+    // one prefill (T=2) plus one per acoustic step built at load, all
+    // replayed directly on the backend.
+    GraphArena                     talker_arena;
+    std::vector<TalkerDecodeGraph> talker_decode_graphs;  // one per 256 step window class, lazy
+    CodePredGraph                  cp_prefill_graph;
+    std::vector<CodePredGraph>     cp_step_graphs;
 };
 
 // Open the talker GGUF and the codec GGUF, load every module on the
