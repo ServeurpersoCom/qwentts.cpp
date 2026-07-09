@@ -132,9 +132,10 @@ them by name :
 ```
 ./build/tts-server \
     --model models/qwen-talker-1.7b-base-Q8_0.gguf \
-    --codec models/qwen-tokenizer-12hz-Q8_0.gguf --port 8080
+    --codec models/qwen-tokenizer-12hz-Q8_0.gguf \
+    --alias qwen3-tts-base --port 8080
 
-curl -X POST localhost:8080/v1/voices -H "Content-Type: application/json" \
+curl -X POST localhost:8080/v1/audio/voices -H "Content-Type: application/json" \
     -d "{\"name\":\"freeman\",\"ref_text\":\"$(cat ref.txt)\",
          \"spk_b64\":\"$(base64 -w0 ref.spk)\",\"rvq_b64\":\"$(base64 -w0 ref.rvq)\"}"
 

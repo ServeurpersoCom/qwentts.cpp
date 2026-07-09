@@ -617,6 +617,7 @@ Required:
   --codec <gguf>          Codec GGUF (qwen-tokenizer-*.gguf)
 
 Optional:
+  --alias <name>          Report this model id instead of the GGUF file name
   --host <ip>             Listen address (default: 127.0.0.1)
   --port <n>              Listen port (default: 8080)
   --lang <n>              Language label (default: auto)
@@ -636,14 +637,14 @@ POST   /v1/audio/speech   OAI text-to-speech; response_format "pcm"
                           fields keep the engine defaults, temperature
                           0 selects greedy decoding, the subtalker
                           mirrors the talker knobs
-GET    /v1/models         single loaded model
-GET    /v1/voices         model speakers plus registered cloned voices
-POST   /v1/voices         register a cloned voice: {name, ref_text,
+GET    /v1/models         single loaded model, using --alias when set
+GET    /v1/audio/voices         model speakers plus registered cloned voices
+POST   /v1/audio/voices         register a cloned voice: {name, ref_text,
                           wav_b64} extracts server side through
                           qt_extract_voice_ref, {name, ref_text,
                           spk_b64, rvq_b64} takes the pre-extracted
                           latents verbatim
-DELETE /v1/voices/{name}  drop a registered voice
+DELETE /v1/audio/voices/{name}  drop a registered voice
 GET    /health            liveness probe
 ```
 

@@ -42,6 +42,7 @@ static void print_usage(const char * prog) {
             "  --model <gguf>          Talker LM GGUF (qwen-talker-*.gguf)\n"
             "  --codec <gguf>          Codec GGUF (qwen-tokenizer-*.gguf)\n\n"
             "Optional:\n"
+            "  --alias <name>          Report this model id instead of the GGUF file name\n"
             "  --host <ip>             Listen address (default: 127.0.0.1)\n"
             "  --port <n>              Listen port (default: 8080)\n"
             "  --lang <name>           Language label (default: auto)\n"
@@ -60,6 +61,7 @@ static std::string basename_of(const char * path) {
 int main(int argc, char ** argv) {
     const char *  talker_path = NULL;
     const char *  codec_path  = NULL;
+    std::string   model_alias;
     std::string   lang        = "auto";
     server_config cfg;
     bool          use_fa     = true;
@@ -71,6 +73,8 @@ int main(int argc, char ** argv) {
             talker_path = argv[++i];
         } else if (!std::strcmp(arg, "--codec") && i + 1 < argc) {
             codec_path = argv[++i];
+        } else if (!std::strcmp(arg, "--alias") && i + 1 < argc) {
+            model_alias = argv[++i];
         } else if (!std::strcmp(arg, "--host") && i + 1 < argc) {
             cfg.host = argv[++i];
         } else if (!std::strcmp(arg, "--port") && i + 1 < argc) {
@@ -110,13 +114,13 @@ int main(int argc, char ** argv) {
     }
 
     tts_backend be;
-    be.model_id = basename_of(talker_path);
+    be.model_id = model_alias.empty() ? basename_of(talker_path) : model_alias;
     int n       = qt_n_speakers(q);
     for (int i = 0; i < n; i++) {
         be.voices.push_back(qt_speaker_name(q, i));
     }
 
-    // Voice registry: POST /v1/voices stores a cloned voice either from a
+    // Voice registry: POST /v1/audio/voices stores a cloned voice either from a
     // WAV (server side extraction through qt_extract_voice_ref) or from
     // pre-extracted .spk / .rvq payloads. Re-registering a name replaces
     // the previous entry.

@@ -10,12 +10,12 @@
 // Endpoints:
 //   POST   /v1/audio/speech   OAI text-to-speech
 //   GET    /v1/models         single loaded model
-//   GET    /v1/voices         model speakers plus registered cloned voices
-//   POST   /v1/voices         register a cloned voice: {name, ref_text,
+//   GET    /v1/audio/voices         model speakers plus registered cloned voices
+//   POST   /v1/audio/voices         register a cloned voice: {name, ref_text,
 //                             wav_b64} extracts server side, {name,
 //                             ref_text, spk_b64, rvq_b64} takes
 //                             pre-extracted latents verbatim
-//   DELETE /v1/voices/{name}  drop a registered voice
+//   DELETE /v1/audio/voices/{name}  drop a registered voice
 //   GET    /health            liveness probe
 //
 // Audio out: response_format "pcm" streams s16le 24 kHz mono chunked as it
@@ -54,7 +54,7 @@ struct tts_request {
     float   repetition_penalty;  // strictly positive
 };
 
-// One voice registration parsed from the POST /v1/voices JSON body.
+// One voice registration parsed from the POST /v1/audio/voices JSON body.
 // Exactly one payload form is present: wav holds decoded base64 WAV
 // bytes for server side extraction, or spk plus rvq hold the raw
 // contents of pre-extracted .spk and .rvq files. ref_text carries the
@@ -75,7 +75,7 @@ using tts_sink = std::function<bool(const float * samples, int n_samples)>;
 // Adapter implemented by each project tool.
 struct tts_backend {
     std::string              model_id;  // reported by GET /v1/models
-    std::vector<std::string> voices;    // reported by GET /v1/voices, may be empty
+    std::vector<std::string> voices;    // reported by GET /v1/audio/voices, may be empty
     // Run synthesis. When the request streams, the adapter routes the ABI
     // on_chunk to sink ; otherwise it pushes the whole buffer once. Returns
     // the ABI status (0 on success), and fills err with the ABI message on
@@ -84,7 +84,7 @@ struct tts_backend {
     // Voice registry hooks, all optional: a null hook answers 501 on the
     // matching route. register_voice stores or replaces a cloned voice,
     // remove_voice drops one (false when absent), registered_voices lists
-    // the current names for GET /v1/voices alongside the model speakers.
+    // the current names for GET /v1/audio/voices alongside the model speakers.
     std::function<bool(const tts_voice_upload & up, std::string & err)>                   register_voice;
     std::function<bool(const std::string & name)>                                         remove_voice;
     std::function<std::vector<std::string>()>                                             registered_voices;
@@ -334,7 +334,7 @@ static bool tts_b64_decode(const std::string & in, std::string & out) {
     return true;
 }
 
-// Parse the POST /v1/voices body: name plus either wav_b64 or the
+// Parse the POST /v1/audio/voices body: name plus either wav_b64 or the
 // spk_b64 / rvq_b64 pair, ref_text optional (enables ICL clone mode).
 static bool tts_parse_voice_upload(const std::string & body, tts_voice_upload & up, std::string & err) {
     yyjson_doc * doc = yyjson_read(body.c_str(), body.size(), 0);
@@ -517,11 +517,11 @@ static int tts_server_run(const tts_backend & be, const server_config & cfg) {
              [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_speech(be, req, res); });
     svr.Get("/v1/models",
             [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_models(be, req, res); });
-    svr.Get("/v1/voices",
+    svr.Get("/v1/audio/voices",
             [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_voices(be, req, res); });
-    svr.Post("/v1/voices",
+    svr.Post("/v1/audio/voices",
              [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_voice_register(be, req, res); });
-    svr.Delete(R"(/v1/voices/(.+))",
+    svr.Delete(R"(/v1/audio/voices/(.+))",
                [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_voice_delete(be, req, res); });
     svr.Get("/health", tts_handle_health);
 
