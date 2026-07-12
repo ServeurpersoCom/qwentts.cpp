@@ -64,6 +64,9 @@ struct CodecStreamGraph {
     struct ggml_tensor *  rows   = nullptr;
     struct ggml_tensor *  mask   = nullptr;
     struct ggml_tensor *  out    = nullptr;
+    std::vector<int32_t>  pos_buf;
+    std::vector<int64_t>  rows_buf;
+    std::vector<float>    mask_buf;
 };
 
 // One primed stream state snapshot: a mirror of every conv context and

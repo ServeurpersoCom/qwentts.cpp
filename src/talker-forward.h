@@ -564,13 +564,14 @@ static bool talker_decode_graph_build(const TalkerWeights *        tw,
         return false;
     }
 
-    tg->gf       = gf;
-    tg->ids_in   = ids_in;
-    tg->overlay  = overlay;
-    tg->pos_in   = pos_in;
-    tg->rows_in  = rows_in;
-    tg->mask_in  = mask_in;
-    tg->logits   = logits;
+    tg->gf      = gf;
+    tg->ids_in  = ids_in;
+    tg->overlay = overlay;
+    tg->pos_in  = pos_in;
+    tg->rows_in = rows_in;
+    tg->mask_in = mask_in;
+    tg->logits  = logits;
+    tg->mask.resize((size_t) n_kv_pad);
     tg->n_kv_pad = n_kv_pad;
     return true;
 }
@@ -620,9 +621,9 @@ static bool talker_forward_decode(const TalkerWeights *        tw,
 
     // Causal mask: keys [0, n_past] carry 0, the padded tail neg inf.
     {
-        std::vector<ggml_fp16_t> mask((size_t) tg->n_kv_pad);
-        const ggml_fp16_t        zero    = ggml_fp32_to_fp16(0.0f);
-        const ggml_fp16_t        neg_inf = ggml_fp32_to_fp16(-INFINITY);
+        std::vector<ggml_fp16_t> & mask    = tg->mask;
+        const ggml_fp16_t          zero    = ggml_fp32_to_fp16(0.0f);
+        const ggml_fp16_t          neg_inf = ggml_fp32_to_fp16(-INFINITY);
         for (size_t i = 0; i < mask.size(); i++) {
             mask[i] = (int) i <= n_past ? zero : neg_inf;
         }

@@ -492,18 +492,17 @@ bool pipeline_codec_decode_stream(PipelineCodec * pc, const int32_t * codes, int
 
     ggml_backend_tensor_set(sg->codes, codes, 0, (size_t) T * (size_t) K * sizeof(int32_t));
 
-    std::vector<int32_t> pos((size_t) T);
-    std::vector<int64_t> rows((size_t) T);
+    sg->pos_buf.resize((size_t) T);
+    sg->rows_buf.resize((size_t) T);
     for (int t = 0; t < T; t++) {
-        pos[(size_t) t]  = pc->stream_pos + t;
-        rows[(size_t) t] = (int64_t) ((pc->stream_pos + t) % ring);
+        sg->pos_buf[(size_t) t]  = pc->stream_pos + t;
+        sg->rows_buf[(size_t) t] = (int64_t) ((pc->stream_pos + t) % ring);
     }
-    ggml_backend_tensor_set(sg->pos, pos.data(), 0, (size_t) T * sizeof(int32_t));
-    ggml_backend_tensor_set(sg->rows, rows.data(), 0, (size_t) T * sizeof(int64_t));
+    ggml_backend_tensor_set(sg->pos, sg->pos_buf.data(), 0, (size_t) T * sizeof(int32_t));
+    ggml_backend_tensor_set(sg->rows, sg->rows_buf.data(), 0, (size_t) T * sizeof(int64_t));
 
-    std::vector<float> mask_buf;
-    tok_trans_build_stream_mask(pc->stream_pos, T, ring, pc->transformer.sliding_window, mask_buf);
-    ggml_backend_tensor_set(sg->mask, mask_buf.data(), 0, mask_buf.size() * sizeof(float));
+    tok_trans_build_stream_mask(pc->stream_pos, T, ring, pc->transformer.sliding_window, sg->mask_buf);
+    ggml_backend_tensor_set(sg->mask, sg->mask_buf.data(), 0, sg->mask_buf.size() * sizeof(float));
 
     enum ggml_status st = ggml_backend_graph_compute(pc->backend, sg->gf);
     if (st != GGML_STATUS_SUCCESS) {
