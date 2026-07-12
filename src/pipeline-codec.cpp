@@ -691,6 +691,10 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
         ggml_build_forward_expand(graph, sn_stage3_dump);
     }
 
+    // Reset before alloc: a prior decode/synthesis may have left the shared
+    // codec sched allocated, which trips GGML_ASSERT(!sched->is_alloc). Mirrors
+    // the decode path (top of this file) and speaker_encoder_extract.
+    ggml_backend_sched_reset(pc->sched);
     if (!ggml_backend_sched_alloc_graph(pc->sched, graph)) {
         qt_log(QT_LOG_ERROR, "[Pipeline] encode sched_alloc_graph failed");
         ggml_backend_sched_reset(pc->sched);
