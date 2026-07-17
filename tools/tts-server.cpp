@@ -62,7 +62,7 @@ int main(int argc, char ** argv) {
     const char *  talker_path = NULL;
     const char *  codec_path  = NULL;
     std::string   model_alias;
-    std::string   lang        = "auto";
+    std::string   lang = "auto";
     server_config cfg;
     bool          use_fa     = true;
     bool          clamp_fp16 = false;
