@@ -393,8 +393,8 @@ static struct ggml_tensor * tok_trans_forward_stream(struct ggml_context *      
     h                      = ggml_add(ctx, h, tr->input_proj_b);
 
     for (int l = 0; l < tr->num_layers; l++) {
-        h = tok_trans_layer_forward_stream(ctx, gf, tr, tr->layers[l], h, positions, mask, kv_rows, kv->k[(size_t) l],
-                                           kv->v[(size_t) l], T, ring);
+        h = tok_trans_layer_forward_stream(ctx, gf, tr, tr->layers[l], h, positions, mask, kv_rows,
+                                           kv_cache_k(kv, 0, l), kv_cache_v(kv, 0, l), T, ring);
     }
 
     h = ggml_rms_norm(ctx, h, tr->rms_norm_eps);

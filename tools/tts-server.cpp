@@ -30,8 +30,11 @@ struct voice_entry {
 };
 
 // Registered voices, name keyed. Every access happens under
-// g_synth_mutex: registration touches the GPU through the extraction
-// path and lookups run inside the already serialized synthesize.
+// g_voices_mutex; the GPU side of a registration is serialized inside
+// the ABI (qt_extract_voice_ref slips between batch frames), and the
+// synthesize lookup copies the latents out so a concurrent replace or
+// delete never frees buffers a running synthesis still reads.
+static std::mutex                                   g_voices_mutex;
 static std::unordered_map<std::string, voice_entry> g_voices;
 
 static void print_usage(const char * prog) {
@@ -46,6 +49,7 @@ static void print_usage(const char * prog) {
             "  --host <ip>             Listen address (default: 127.0.0.1)\n"
             "  --port <n>              Listen port (default: 8080)\n"
             "  --lang <name>           Language label (default: auto)\n"
+            "  --max-batch <n>         Concurrent requests batched on the GPU (default: 1)\n"
             "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n",
             prog);
@@ -66,6 +70,7 @@ int main(int argc, char ** argv) {
     server_config cfg;
     bool          use_fa     = true;
     bool          clamp_fp16 = false;
+    int           max_batch  = 1;
 
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
@@ -85,6 +90,8 @@ int main(int argc, char ** argv) {
             use_fa = false;
         } else if (!std::strcmp(arg, "--clamp-fp16")) {
             clamp_fp16 = true;
+        } else if (!std::strcmp(arg, "--max-batch") && i + 1 < argc) {
+            max_batch = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--help") || !std::strcmp(arg, "-h")) {
             print_usage(argv[0]);
             return 0;
@@ -106,6 +113,7 @@ int main(int argc, char ** argv) {
     iparams.codec_path  = codec_path;
     iparams.use_fa      = use_fa;
     iparams.clamp_fp16  = clamp_fp16;
+    iparams.max_batch   = max_batch;
 
     struct qt_context * q = qt_init(&iparams);
     if (!q) {
@@ -136,11 +144,7 @@ int main(int argc, char ** argv) {
                 err = "cannot decode the WAV payload";
                 return false;
             }
-            enum qt_status rc;
-            {
-                std::lock_guard<std::mutex> lock(g_synth_mutex);
-                rc = qt_extract_voice_ref(q, pcm, T, &entry.ref);
-            }
+            enum qt_status rc = qt_extract_voice_ref(q, pcm, T, &entry.ref);
             free(pcm);
             if (rc != QT_STATUS_OK) {
                 err = qt_last_error();
@@ -167,7 +171,7 @@ int main(int argc, char ** argv) {
             std::memcpy(entry.ref.ref_codes, codes.data(), codes.size() * sizeof(int32_t));
         }
 
-        std::lock_guard<std::mutex> lock(g_synth_mutex);
+        std::lock_guard<std::mutex> lock(g_voices_mutex);
         auto                        it = g_voices.find(up.name);
         if (it != g_voices.end()) {
             qt_voice_ref_free(&it->second.ref);
@@ -180,7 +184,7 @@ int main(int argc, char ** argv) {
     };
 
     be.remove_voice = [](const std::string & name) -> bool {
-        std::lock_guard<std::mutex> lock(g_synth_mutex);
+        std::lock_guard<std::mutex> lock(g_voices_mutex);
         auto                        it = g_voices.find(name);
         if (it == g_voices.end()) {
             return false;
@@ -191,7 +195,7 @@ int main(int argc, char ** argv) {
     };
 
     be.registered_voices = []() -> std::vector<std::string> {
-        std::lock_guard<std::mutex> lock(g_synth_mutex);
+        std::lock_guard<std::mutex> lock(g_voices_mutex);
         std::vector<std::string>    names;
         names.reserve(g_voices.size());
         for (const auto & kv : g_voices) {
@@ -214,15 +218,36 @@ int main(int argc, char ** argv) {
         p.text = req.input.c_str();
         p.lang = lang.c_str();
 
-        auto vit = req.voice.empty() ? g_voices.end() : g_voices.find(req.voice);
-        if (vit != g_voices.end()) {
-            const voice_entry & v = vit->second;
-            p.ref_spk_emb         = v.ref.ref_spk_emb;
-            p.ref_spk_dim         = v.ref.ref_spk_dim;
-            if (!v.ref_text.empty() && v.ref.ref_codes) {
-                p.ref_codes = v.ref.ref_codes;
-                p.ref_T     = v.ref.ref_T;
-                p.ref_text  = v.ref_text.c_str();
+        // Copy the registered voice latents out under the lock: the
+        // synthesis may run for seconds while another connection
+        // replaces or deletes the entry.
+        std::vector<float>   voice_spk;
+        std::vector<int32_t> voice_codes;
+        std::string          voice_ref_text;
+        int                  voice_ref_T = 0;
+        bool                 have_voice  = false;
+        if (!req.voice.empty()) {
+            std::lock_guard<std::mutex> lock(g_voices_mutex);
+            auto                        vit = g_voices.find(req.voice);
+            if (vit != g_voices.end()) {
+                const voice_entry & v = vit->second;
+                have_voice            = true;
+                voice_spk.assign(v.ref.ref_spk_emb, v.ref.ref_spk_emb + v.ref.ref_spk_dim);
+                if (!v.ref_text.empty() && v.ref.ref_codes) {
+                    voice_codes.assign(v.ref.ref_codes,
+                                       v.ref.ref_codes + (size_t) v.ref.num_codebooks * (size_t) v.ref.ref_T);
+                    voice_ref_T    = v.ref.ref_T;
+                    voice_ref_text = v.ref_text;
+                }
+            }
+        }
+        if (have_voice) {
+            p.ref_spk_emb = voice_spk.data();
+            p.ref_spk_dim = (int) voice_spk.size();
+            if (!voice_codes.empty()) {
+                p.ref_codes = voice_codes.data();
+                p.ref_T     = voice_ref_T;
+                p.ref_text  = voice_ref_text.c_str();
             }
         } else if (!req.voice.empty() && qt_n_speakers(q) > 0) {
             p.speaker = req.voice.c_str();

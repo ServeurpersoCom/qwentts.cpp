@@ -25,24 +25,49 @@
 #include "version.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <mutex>
 #include <new>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Internal definition of the opaque handle. C++ types are fine here
 // because nothing in this struct ever crosses the public ABI boundary :
 // callers only ever see `struct qt_context *`. PipelineTTS already
 // embeds the PipelineCodec, so no separate codec field is needed.
+//
+// gpu_mu serializes every GPU touching entry: the batch worker holds
+// it per engine phase (admit, frame step) so a voice extraction or a
+// max_batch == 1 synthesize slips between frames instead of racing the
+// backend from another thread.
+//
+// The scheduler members drive the max_batch > 1 mode: qt_synthesize
+// enqueues a TtsJob and blocks on cv_done until the worker retires it.
+// The worker owns the long lived TtsEngine, admits queued jobs into
+// free slots between frames and steps the batch until both the queue
+// and the slots drain.
 struct qt_context {
     BackendPair  bp;
     PipelineTTS  pt;
     BPETokenizer tok;
+
+    std::mutex gpu_mu;
+
+    int                     max_batch = 1;
+    std::thread             worker;
+    std::mutex              mu;
+    std::condition_variable cv_work;
+    std::condition_variable cv_done;
+    std::deque<TtsJob *>    queue;
+    bool                    stop = false;
 };
 
 // Thread-local backing store for qt_last_error(). std::string sized once
@@ -193,6 +218,7 @@ void qt_init_default_params(struct qt_init_params * p) {
     p->codec_path  = nullptr;
     p->use_fa      = true;
     p->clamp_fp16  = false;
+    p->max_batch   = 1;
 }
 
 void qt_tts_default_params(struct qt_tts_params * p) {
@@ -236,6 +262,62 @@ int qt_num_codebooks(const struct qt_context * q) {
     return q->pt.num_code_groups;
 }
 
+// Batch worker: owns the long lived TtsEngine and the GPU hot loop.
+// Sleeps until work arrives, then admits queued jobs into free slots
+// between frames and steps the batch until both the queue and the
+// slots drain. Every GPU touching phase runs under gpu_mu so a voice
+// extraction or another entry can slip between frames from its own
+// thread. Retired jobs get their done flag under mu and a cv_done
+// broadcast so the blocked qt_synthesize callers wake.
+static void qt_batch_worker(qt_context * q) {
+    TtsEngine *                  e = tts_engine_new(&q->pt, &q->tok);
+    std::vector<TtsJob *>        retired;
+    std::unique_lock<std::mutex> lk(q->mu);
+    for (;;) {
+        q->cv_work.wait(lk, [&] { return q->stop || !q->queue.empty(); });
+        if (q->stop && q->queue.empty()) {
+            break;
+        }
+        while (!q->queue.empty() || tts_engine_active(e) > 0) {
+            // Admit up to max_batch: joins happen at frame boundaries,
+            // each one stalls the active slots for one prefill.
+            while (!q->queue.empty() && tts_engine_active(e) < q->max_batch) {
+                TtsJob * j = q->queue.front();
+                q->queue.pop_front();
+                lk.unlock();
+                bool admitted;
+                {
+                    std::lock_guard<std::mutex> gpu(q->gpu_mu);
+                    admitted = tts_engine_admit(e, j);
+                }
+                lk.lock();
+                if (!admitted) {
+                    j->done = true;
+                    q->cv_done.notify_all();
+                }
+            }
+            if (tts_engine_active(e) == 0) {
+                break;
+            }
+            lk.unlock();
+            retired.clear();
+            {
+                std::lock_guard<std::mutex> gpu(q->gpu_mu);
+                tts_engine_step(e, &retired);
+            }
+            lk.lock();
+            for (TtsJob * j : retired) {
+                j->done = true;
+            }
+            if (!retired.empty()) {
+                q->cv_done.notify_all();
+            }
+        }
+    }
+    lk.unlock();
+    tts_engine_free(e);
+}
+
 struct qt_context * qt_init(const struct qt_init_params * params) {
     if (!params || !params->talker_path || !params->codec_path) {
         qt_set_error("qt_init: params, talker_path or codec_path is NULL");
@@ -252,10 +334,14 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
 
     qt_log(QT_LOG_INFO, "[Qwen] qwentts.cpp %s", qt_version());
 
+    // ABI v3 tail field: zero init from older callers means 1.
+    const int max_batch = (params->abi_version >= 3 && params->max_batch > 1) ? params->max_batch : 1;
+
     // new qt_context() value-initialises every field: POD aggregates
     // (BackendPair, PipelineTTS) are zero-init, std containers in
     // BPETokenizer construct empty.
     qt_context * q = new qt_context();
+    q->max_batch   = max_batch;
 
     // The load chain runs inside a try block. Any failure deep in the
     // GGUF reader, the codec load or the LM weight load throws via
@@ -269,7 +355,7 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
         }
 
         if (!pipeline_tts_load(&q->pt, params->talker_path, params->codec_path, q->bp, params->use_fa,
-                               params->clamp_fp16)) {
+                               params->clamp_fp16, max_batch)) {
             qt_throw("qt_init: pipeline_tts_load failed for '%s' / '%s'", params->talker_path, params->codec_path);
         }
 
@@ -292,12 +378,27 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
         return nullptr;
     }
 
+    // Batch mode: one worker thread owns the long lived engine and the
+    // GPU hot loop; qt_synthesize enqueues and blocks on completion.
+    if (q->max_batch > 1) {
+        q->worker = std::thread(qt_batch_worker, q);
+        qt_log(QT_LOG_INFO, "[Qwen] Batch scheduler started (max_batch=%d)", q->max_batch);
+    }
+
     return q;
 }
 
 void qt_free(struct qt_context * q) {
     if (!q) {
         return;
+    }
+    if (q->worker.joinable()) {
+        {
+            std::lock_guard<std::mutex> lk(q->mu);
+            q->stop = true;
+        }
+        q->cv_work.notify_all();
+        q->worker.join();
     }
     pipeline_tts_free(&q->pt);
     backend_release(q->bp.backend, q->bp.cpu_backend);
@@ -353,6 +454,10 @@ enum qt_status qt_extract_voice_ref(struct qt_context *   q,
     }
 
     try {
+        // Serialize against the batch worker and any concurrent
+        // synthesize: the extraction slips between two engine frames.
+        std::lock_guard<std::mutex> gpu(q->gpu_mu);
+
         // Lazy residency: the first reference audio request pays the
         // weight load once, mirroring the qt_synthesize ref_audio path.
         if (!q->pt.spk_enc_loaded) {
@@ -534,7 +639,39 @@ enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params *
     // crosses the extern "C" boundary.
     try {
         const int64_t resolved_seed = qt_resolve_seed(params->seed);
-        return pipeline_tts_synthesize(&q->pt, &q->tok, params, resolved_seed, out);
+
+        if (q->max_batch <= 1) {
+            // Single sequence mode: run synchronously on the calling
+            // thread under gpu_mu, so concurrent callers serialize FIFO
+            // and callbacks fire on their own caller's thread.
+            std::lock_guard<std::mutex> gpu(q->gpu_mu);
+            return pipeline_tts_synthesize(&q->pt, &q->tok, params, resolved_seed, out);
+        }
+
+        // Batch mode: enqueue and block until the worker retires the
+        // job. qt_last_error is thread local, so the engine captured
+        // the worker side message into job.error at retirement; replay
+        // it into this caller's slot so the errno style contract holds
+        // across the thread hop.
+        TtsJob job;
+        job.params        = params;
+        job.resolved_seed = resolved_seed;
+        job.out           = out;
+        job.status        = QT_STATUS_OK;
+        job.done          = false;
+        {
+            std::lock_guard<std::mutex> lk(q->mu);
+            q->queue.push_back(&job);
+        }
+        q->cv_work.notify_all();
+        {
+            std::unique_lock<std::mutex> lk(q->mu);
+            q->cv_done.wait(lk, [&] { return job.done; });
+        }
+        if (job.status != QT_STATUS_OK && !job.error.empty()) {
+            qt_set_error("%s", job.error.c_str());
+        }
+        return job.status;
     } catch (const std::exception & e) {
         qt_set_error("%s", e.what());
         qt_log(QT_LOG_ERROR, "[Qwen] %s", e.what());

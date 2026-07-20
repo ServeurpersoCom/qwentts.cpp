@@ -259,7 +259,7 @@ static bool pipeline_codec_stream_ensure(PipelineCodec * pc) {
     }
 
     if (!kv_cache_init(&pc->stream_kv, pc->transformer.num_layers, pc->transformer.num_kv_heads,
-                       pc->transformer.head_dim, CODEC_STREAM_RING, pc->backend)) {
+                       pc->transformer.head_dim, CODEC_STREAM_RING, 1, pc->backend)) {
         ggml_backend_buffer_free(pc->stream_buf);
         pc->stream_buf = NULL;
         ggml_free(pc->stream_ctx);
@@ -281,7 +281,7 @@ bool pipeline_codec_stream_reset(PipelineCodec * pc) {
     // the zeroed KV ring stays hidden behind the sliding window mask.
     ggml_backend_buffer_clear(pc->stream_buf, 0);
     ggml_backend_buffer_clear(pc->stream_kv.buffer, 0);
-    kv_cache_reset(&pc->stream_kv);
+    kv_cache_reset(&pc->stream_kv, 0);
     pc->stream_pos = 0;
     return true;
 }
@@ -305,14 +305,17 @@ static bool codec_snap_ensure(PipelineCodec * pc, CodecStateSnap * s) {
     if (s->ctx) {
         return true;
     }
+    // Views alias memory the owning tensors already cover, so the
+    // walker skips them: the mirror holds one duplicate per real
+    // tensor and the positional pairing in codec_snap_copy holds.
     int n = 0;
     for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_ctx); t;
          t                      = ggml_get_next_tensor(pc->stream_ctx, t)) {
-        n++;
+        n += t->view_src ? 0 : 1;
     }
     for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_kv.ctx); t;
          t                      = ggml_get_next_tensor(pc->stream_kv.ctx, t)) {
-        n++;
+        n += t->view_src ? 0 : 1;
     }
     struct ggml_init_params gp = { ggml_tensor_overhead() * (size_t) n, NULL, true };
     s->ctx                     = ggml_init(gp);
@@ -322,11 +325,15 @@ static bool codec_snap_ensure(PipelineCodec * pc, CodecStateSnap * s) {
     }
     for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_ctx); t;
          t                      = ggml_get_next_tensor(pc->stream_ctx, t)) {
-        ggml_dup_tensor(s->ctx, t);
+        if (!t->view_src) {
+            ggml_dup_tensor(s->ctx, t);
+        }
     }
     for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_kv.ctx); t;
          t                      = ggml_get_next_tensor(pc->stream_kv.ctx, t)) {
-        ggml_dup_tensor(s->ctx, t);
+        if (!t->view_src) {
+            ggml_dup_tensor(s->ctx, t);
+        }
     }
     s->buf = ggml_backend_alloc_ctx_tensors(s->ctx, pc->backend);
     if (!s->buf) {
@@ -343,12 +350,20 @@ static bool codec_snap_ensure(PipelineCodec * pc, CodecStateSnap * s) {
 static void codec_snap_copy(PipelineCodec * pc, CodecStateSnap * s, bool save) {
     struct ggml_tensor * m = ggml_get_first_tensor(s->ctx);
     for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_ctx); t;
-         t = ggml_get_next_tensor(pc->stream_ctx, t), m = ggml_get_next_tensor(s->ctx, m)) {
+         t                      = ggml_get_next_tensor(pc->stream_ctx, t)) {
+        if (t->view_src) {
+            continue;
+        }
         ggml_backend_tensor_copy(save ? t : m, save ? m : t);
+        m = ggml_get_next_tensor(s->ctx, m);
     }
     for (struct ggml_tensor * t = ggml_get_first_tensor(pc->stream_kv.ctx); t;
-         t = ggml_get_next_tensor(pc->stream_kv.ctx, t), m = ggml_get_next_tensor(s->ctx, m)) {
+         t                      = ggml_get_next_tensor(pc->stream_kv.ctx, t)) {
+        if (t->view_src) {
+            continue;
+        }
         ggml_backend_tensor_copy(save ? t : m, save ? m : t);
+        m = ggml_get_next_tensor(s->ctx, m);
     }
 }
 
@@ -387,6 +402,34 @@ bool pipeline_codec_stream_snapshot(PipelineCodec * pc, uint64_t key) {
     lru->stamp = ++pc->snap_stamp;
     qt_log(QT_LOG_INFO, "[Pipeline] Codec state snapshot saved (%d frames)", lru->pos);
     return true;
+}
+
+bool pipeline_codec_stream_save(PipelineCodec * pc, CodecStateSnap * s) {
+    if (!pc->stream_ready || !codec_snap_ensure(pc, s)) {
+        return false;
+    }
+    codec_snap_copy(pc, s, true);
+    s->pos = pc->stream_pos;
+    return true;
+}
+
+bool pipeline_codec_stream_load(PipelineCodec * pc, CodecStateSnap * s) {
+    if (!pc->stream_ready || !s->ctx) {
+        return false;
+    }
+    codec_snap_copy(pc, s, false);
+    pc->stream_pos = s->pos;
+    return true;
+}
+
+void pipeline_codec_snap_free(CodecStateSnap * s) {
+    if (s->buf) {
+        ggml_backend_buffer_free(s->buf);
+    }
+    if (s->ctx) {
+        ggml_free(s->ctx);
+    }
+    *s = {};
 }
 
 // Build the static stream graph of chunk width T = 1 << cls: the

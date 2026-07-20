@@ -57,7 +57,7 @@ extern "C" {
 // git short hash + commit date string returned by qt_version(); for
 // binding compat checks, QT_ABI_VERSION is the only number that
 // matters.
-#define QT_ABI_VERSION 2
+#define QT_ABI_VERSION 3
 
 // Returns a static string of the form "<git-hash> (<date>)" identifying
 // the exact commit this binary was built from. Safe to call from any
@@ -121,6 +121,19 @@ struct qt_init_params {
     const char * codec_path;
     bool         use_fa;
     bool         clamp_fp16;
+
+    // ABI v3. Maximum number of concurrent synthesis requests batched
+    // on the GPU. 0 and 1 select the single sequence behavior (zero
+    // init from older callers keeps the previous semantics); values
+    // above 1 size the KV cache sets accordingly and start an internal
+    // worker thread that coalesces concurrent qt_synthesize calls into
+    // batched decode steps, queueing FIFO beyond max_batch. With
+    // max_batch > 1 the on_chunk and cancel callbacks of every request
+    // are invoked from that worker thread, not from the calling
+    // thread; callbacks must be safe to run there and must not call
+    // back into the qwen_* API. qt_synthesize itself stays blocking
+    // and thread safe in both modes.
+    int max_batch;
 };
 
 // Initialise to the standard defaults: both paths NULL (caller must set
@@ -289,7 +302,12 @@ struct qt_tts_params {
     // the streaming pipeline: audio chunks emit through on_chunk and
     // `out` stays empty on success. on_chunk NULL keeps the buffered
     // path. The last chunk on EOS or max_new flushes whatever frames
-    // remain.
+    // remain. With qt_init_params.max_batch > 1 the callback runs on
+    // the internal batch worker thread, not the qt_synthesize caller
+    // thread: it must be safe there, must not call back into the
+    // qwen_* API, and a blocking body stalls every batched request, so
+    // hand the samples to the consumer thread through a queue instead
+    // of blocking.
     qt_audio_chunk_cb on_chunk;
     void *            on_chunk_user_data;
 

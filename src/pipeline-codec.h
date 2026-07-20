@@ -198,6 +198,15 @@ bool pipeline_codec_stream_restore(PipelineCodec * pc, uint64_t key);
 // the least recently used slot when all are taken.
 bool pipeline_codec_stream_snapshot(PipelineCodec * pc, uint64_t key);
 
+// Caller owned stream state mirror, enabling multiple interleaved
+// streamed utterances over the single live state: save parks the live
+// state (and position cursor) into s, load restores it. The mirror
+// allocates lazily on the first save; key and stamp stay unused. Free
+// with pipeline_codec_snap_free.
+bool pipeline_codec_stream_save(PipelineCodec * pc, CodecStateSnap * s);
+bool pipeline_codec_stream_load(PipelineCodec * pc, CodecStateSnap * s);
+void pipeline_codec_snap_free(CodecStateSnap * s);
+
 // Encode a 24 kHz mono waveform into RVQ codes.
 //   audio    : [n_samples] f32 mono 24 kHz. Must be a multiple of
 //              TOKENIZER_HOP_LENGTH (1920); the caller is expected

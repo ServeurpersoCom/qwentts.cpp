@@ -26,14 +26,18 @@
 #include "audio-io.h"
 #include "yyjson.h"
 
+#include <atomic>
 #include <cfloat>
 #include <cmath>
+#include <condition_variable>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 // One synthesis request parsed from the OAI JSON body.
@@ -95,8 +99,9 @@ struct server_config {
     int         port = 8080;
 };
 
-// Single GPU context : synthesis is serialised FIFO across connections.
-static std::mutex        g_synth_mutex;
+// Concurrency lives behind the ABI: qt_synthesize is thread safe and
+// batches concurrent requests when the context was initialised with
+// max_batch > 1, so connection threads call the backend directly.
 static httplib::Server * g_svr = nullptr;
 
 static void tts_on_signal(int) {
@@ -252,18 +257,18 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
     }
 
     if (req.format == "wav") {
-        // One-shot : collect the whole utterance, then emit a RIFF file.
+        // One-shot : collect the whole utterance, then emit a RIFF
+        // file. The backend call blocks this connection thread; in
+        // batch mode the chunks arrive from the ABI worker thread while
+        // this thread waits inside qt_synthesize, so the plain append
+        // stays single producer and the blocking return synchronizes.
         std::vector<float> buf;
         tts_sink           sink = [&buf](const float * s, int n) {
             buf.insert(buf.end(), s, s + n);
             return true;
         };
         std::string synth_err;
-        int         rc;
-        {
-            std::lock_guard<std::mutex> lock(g_synth_mutex);
-            rc = be.synthesize(req, sink, synth_err);
-        }
+        int         rc = be.synthesize(req, sink, synth_err);
         if (rc != 0) {
             tts_json_error(res, tts_status_to_http(rc), "server_error",
                            synth_err.empty() ? "synthesis failed" : synth_err.c_str());
@@ -274,26 +279,71 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
         return;
     }
 
-    // Streaming : run synthesis inside the chunked provider on the connection
-    // thread, pushing s16le frames as the codec produces them. A failed
-    // sink.write means the client disconnected, which aborts generation and
-    // frees the GPU instead of finishing a stream nobody reads.
-    res.set_header("Cache-Control", "no-cache");
-    res.set_header("X-Accel-Buffering", "no");
-    res.set_chunked_content_provider("audio/pcm", [&be, req](size_t, httplib::DataSink & sink) mutable -> bool {
-        tts_sink push = [&sink](const float * s, int n) {
+    // Streaming : the synthesis runs on its own thread pushing s16le
+    // bytes into a queue; the connection thread drains the queue into
+    // the chunked sink. The decoupling keeps a slow client from
+    // stalling the ABI worker (head of line blocking across the whole
+    // batch), and a client disconnect flips client_gone so the next
+    // chunk callback aborts generation and frees the GPU instead of
+    // finishing a stream nobody reads. Backpressure is the utterance
+    // itself: pending grows at most to the full PCM of one synthesis.
+    struct stream_state {
+        std::mutex              mu;
+        std::condition_variable cv;
+        std::string             pending;
+        bool                    done = false;
+        std::atomic<bool>       client_gone{ false };
+        std::thread             th;
+    };
+
+    auto st = std::make_shared<stream_state>();
+
+    st->th = std::thread([&be, req, st]() {
+        tts_sink push = [st](const float * s, int n) {
+            if (st->client_gone.load(std::memory_order_acquire)) {
+                return false;
+            }
             std::string bytes;
             tts_append_s16le(bytes, s, n);
-            return sink.write(bytes.data(), bytes.size());
+            std::lock_guard<std::mutex> lk(st->mu);
+            st->pending += bytes;
+            st->cv.notify_all();
+            return true;
         };
         std::string synth_err;
-        {
-            std::lock_guard<std::mutex> lock(g_synth_mutex);
-            be.synthesize(req, push, synth_err);
-        }
-        sink.done();
-        return true;
+        be.synthesize(req, push, synth_err);
+        std::lock_guard<std::mutex> lk(st->mu);
+        st->done = true;
+        st->cv.notify_all();
     });
+
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("X-Accel-Buffering", "no");
+    res.set_chunked_content_provider(
+        "audio/pcm",
+        [st](size_t, httplib::DataSink & sink) -> bool {
+            std::string chunk;
+            {
+                std::unique_lock<std::mutex> lk(st->mu);
+                st->cv.wait(lk, [&] { return st->done || !st->pending.empty(); });
+                chunk.swap(st->pending);
+            }
+            if (!chunk.empty()) {
+                if (!sink.write(chunk.data(), chunk.size())) {
+                    st->client_gone.store(true, std::memory_order_release);
+                    return false;
+                }
+                return true;
+            }
+            sink.done();
+            return true;
+        },
+        [st](bool) {
+            st->client_gone.store(true, std::memory_order_release);
+            if (st->th.joinable()) {
+                st->th.join();
+            }
+        });
 }
 
 // Decode standard base64 (with optional padding) into out. Returns
