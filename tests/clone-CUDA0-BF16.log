@@ -1,9 +1,9 @@
-[Qwen] qwentts.cpp bcac463 (2026-07-05)
+[Qwen] qwentts.cpp 53c84fe (2026-07-20)
 ggml_cuda_init: found 1 CUDA devices (Total VRAM: 97247 MiB):
   Device 0: NVIDIA RTX PRO 6000 Blackwell Workstation Edition, compute capability 12.0, VMM: yes, VRAM: 97247 MiB
 load_backend: loaded CUDA backend from /mnt/workspace/git/qwentts.cpp/build/libggml-cuda.so
 ggml_vulkan: Found 1 Vulkan devices:
-ggml_vulkan: 0 = NVIDIA RTX PRO 6000 Blackwell Workstation Edition (NVIDIA) | uma: 0 | fp16: 1 | bf16: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: NV_coopmat2
+ggml_vulkan: 0 = NVIDIA RTX PRO 6000 Blackwell Workstation Edition (NVIDIA) | uma: 0 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: NV_coopmat2
 load_backend: loaded Vulkan backend from /mnt/workspace/git/qwentts.cpp/build/libggml-vulkan.so
 load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libggml-cpu-zen4.so
 [Load] Talker backend: CUDA0 (CPU threads: 16)
@@ -23,9 +23,9 @@ load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libgg
 [DAC] Loaded: 4 blocks (strides 8/5/4/3), 24 kHz mono out, weights 142.9 MB
 [WeightCtx] Loaded 2 tensors, 3.0 MB into backend
 [Pipeline] Ready: hop 1920 samples @ 24000 Hz mono, 16 codebooks @ 12.5 Hz
-[KVCache] Allocated: 28 layers, 8 KV heads, head_dim 128, max_seq_len 4096 -> 896 MB
-[KVCache] Allocated: 5 layers, 8 KV heads, head_dim 128, max_seq_len 16 -> 0 MB
-[Pipeline] Loaded: arch=1b7 variant=base tokenizer=qwen3_tts_tokenizer_12hz codebooks=16 speaker_encoder=deferred speakers=0 fa=on clamp_fp16=off
+[KVCache] Allocated: 28 layers, 8 KV heads, head_dim 128, max_seq_len 4096, 1 sets -> 896 MB
+[KVCache] Allocated: 5 layers, 8 KV heads, head_dim 128, max_seq_len 16, 1 sets -> 0 MB
+[Pipeline] Loaded: arch=1b7 variant=base tokenizer=qwen3_tts_tokenizer_12hz codebooks=16 speaker_encoder=deferred speakers=0 fa=on clamp_fp16=off max_batch=1
 [BPE] Loaded from GGUF: 151676 vocab, 151291 merges, eos_id=151643
 [BPE] Registered 5 arch special tokens (total specials=6)
 [WAV] Read buffer: 380672 samples, 22050 Hz, 1 ch, 16 bit
@@ -33,15 +33,15 @@ load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libgg
 [Audio-Resample] Done: 380672 -> 414337 samples
 [WeightCtx] Loaded 76 tensors, 34.9 MB into backend
 [SpeakerEncoder] Loaded: enc_dim=2048 sr=24000 mel_dim=128 hidden=512 mfa=1536 asp_attn=128 se=128 scale=8
-[Pipeline] Speaker encoder lazy loaded in 4 ms
+[Pipeline] Speaker encoder lazy loaded in 18 ms
 [Debug] mel-spk: [1618, 128] first4: -6.330339 -6.170074 -6.011195 -6.243161
 [Debug] mel-hann: [1024] first4: 0.000000 0.000009 0.000038 0.000085
 [Debug] mel-basis: [128, 513] first4: 0.000000 0.033550 0.008569 0.000000
 [Debug] mel-mag: [1618, 513] first4: 0.047604 0.042322 0.042187 0.066630
-[Debug] spk-frontend: [1618, 512] first4: 0.000000 0.101562 0.858398 0.000000
-[Debug] spk-block3: [1618, 512] first4: 1.958879 0.101562 1.239357 0.246141
-[Debug] spk-mfa: [1618, 1536] first4: 0.000000 0.919922 0.609741 0.000000
-[Debug] spk-asp: [1, 3072] first4: 0.067580 0.118872 0.240696 0.344030
+[Debug] spk-frontend: [1618, 512] first4: 0.000000 0.097904 0.854992 0.000000
+[Debug] spk-block3: [1618, 512] first4: 1.955988 0.097904 1.233304 0.246811
+[Debug] spk-mfa: [1618, 1536] first4: 0.000000 0.922734 0.614915 0.000000
+[Debug] spk-asp: [1, 3072] first4: 0.067723 0.119136 0.240880 0.344137
 [SpkExtract] Extracted 2048-dim embedding (414337 samples, padded 415105)
 [WeightCtx] Loaded 28 tensors, 24.1 MB into backend
 [SEANet] Loaded: 4 stages (ratios 4/5/6/8), 64 -> 512 channels, weights 24.1 MB
@@ -51,11 +51,11 @@ load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libgg
 [EncDownsample] Loaded: k=4 stride=2, 512 -> 512 channels, weights 2.0 MB
 [WeightCtx] Loaded 20 tensors, 34.0 MB into backend
 [EncQuantizer] Loaded: 16 codebooks (1 semantic + 15 acoustic), 2048 entries x 256 dim, hidden 512, weights 34.0 MB
-[Pipeline] Codec encoder lazy loaded in 42 ms
+[Pipeline] Codec encoder lazy loaded in 116 ms
 [Debug] audio-input: [412800] first4: -0.000546 -0.001162 -0.000871 0.000340
 [Debug] seanet-out: [430, 512] first4: -0.111631 13.770183 -0.302467 2.984188
-[Debug] enc-transformer-out: [430, 512] first4: 0.531195 3.238480 -0.146394 0.612285
-[Debug] codec-pre-fsq: [215, 512] first4: -3.886719 -7.015625 -0.871094 2.914062
+[Debug] enc-transformer-out: [430, 512] first4: 0.536580 3.214924 -0.152684 0.613806
+[Debug] codec-pre-fsq: [215, 512] first4: -3.876953 -7.023438 -0.895508 2.943359
 [Debug] seanet-init: [412800, 64] first4: -0.015825 -0.054180 -0.117431 0.038554
 [Debug] seanet-resnet0: [412800, 64] first4: 0.057569 -0.220525 -0.137337 -0.251168
 [Debug] seanet-stage0: [103200, 128] first4: 0.233175 -0.323887 0.247025 0.205248
@@ -67,87 +67,41 @@ load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libgg
 [Debug] talker-input-embed: [225, 2048] first4: 0.022162 -0.009036 0.008171 -0.020198
 [Debug] trailing-text-hidden: [1, 2048] first4: -0.005340 0.008744 -0.004225 0.001144
 [Debug] tts-pad-embed: [2048] first4: -0.005340 0.008744 -0.004225 0.001144
-[Debug] spk-emb: [2048] first4: 0.098059 -0.023872 -0.011379 0.006934
+[Debug] spk-emb: [2048] first4: 0.098317 -0.023761 -0.011860 0.006760
 [Debug] ref-codes: [16, 215] first4: 1221.000000 2042.000000 509.000000 1522.000000
-[Debug] talker-hidden-prefill-l0: [225, 2048] first4: -0.461236 -0.069827 0.016106 -0.039241
-[Debug] talker-hidden-prefill-l7: [225, 2048] first4: -1.527145 -0.010904 0.330830 1.785726
-[Debug] talker-hidden-prefill-l14: [225, 2048] first4: -1.298392 0.186105 0.431904 1.752741
-[Debug] talker-hidden-prefill-l21: [225, 2048] first4: -0.771681 0.167680 0.780671 1.118511
-[Debug] talker-hidden-prefill-l27: [225, 2048] first4: 7.162132 -34.503532 -7.128798 28.739269
-[Debug] talker-hidden-prefill-final: [225, 2048] first4: 0.243477 -1.224848 -0.225186 0.890532
-[Debug] talker-logits-prefill: [3072] first4: 0.871094 -7.875000 -6.593750 -10.375000
+[Debug] talker-hidden-prefill-l0: [225, 2048] first4: -0.461261 -0.069988 0.015911 -0.039094
+[Debug] talker-hidden-prefill-l7: [225, 2048] first4: -1.523625 -0.015407 0.347368 1.776475
+[Debug] talker-hidden-prefill-l14: [225, 2048] first4: -1.295189 0.181396 0.448390 1.743353
+[Debug] talker-hidden-prefill-l21: [225, 2048] first4: -0.769886 0.163224 0.799067 1.112840
+[Debug] talker-hidden-prefill-l27: [225, 2048] first4: 7.045298 -34.398609 -7.069448 28.624956
+[Debug] talker-hidden-prefill-final: [225, 2048] first4: 0.239789 -1.222574 -0.223577 0.888043
+[Debug] talker-logits-prefill: [3072] first4: 0.944606 -7.870981 -6.684478 -10.343767
+[Batch] Admit slot=0 T_ctx=225 prefill=22.4 ms build=1.4 ms (stall for 0 active slots)
 [Sample] step=0 c0=27 u=-1.0000000000 subseq=0
-[Sample-CP] g=0 c=1408 u=-1.0000000000 subseq=1
-[Sample-CP] g=1 c=1824 u=-1.0000000000 subseq=2
-[Sample-CP] g=2 c=400 u=-1.0000000000 subseq=3
-[Sample-CP] g=3 c=240 u=-1.0000000000 subseq=4
-[Sample-CP] g=4 c=2010 u=-1.0000000000 subseq=5
-[Sample-CP] g=5 c=196 u=-1.0000000000 subseq=6
-[Sample-CP] g=6 c=580 u=-1.0000000000 subseq=7
-[Sample-CP] g=7 c=1713 u=-1.0000000000 subseq=8
-[Sample-CP] g=8 c=1221 u=-1.0000000000 subseq=9
-[Sample-CP] g=9 c=1796 u=-1.0000000000 subseq=10
-[Sample-CP] g=10 c=1228 u=-1.0000000000 subseq=11
-[Sample-CP] g=11 c=2015 u=-1.0000000000 subseq=12
-[Sample-CP] g=12 c=143 u=-1.0000000000 subseq=13
-[Sample-CP] g=13 c=1062 u=-1.0000000000 subseq=14
-[Sample-CP] g=14 c=1094 u=-1.0000000000 subseq=15
 [Debug] codes-step0: [16] first4: 27.000000 1408.000000 1824.000000 400.000000
-[Debug] next-emb-step0: [2048] first4: 0.010331 -0.009322 0.074922 0.036956
-[Debug] talker-hidden-step1: [2048] first4: 0.017435 2.931466 -0.766813 0.054457
+[Debug] next-emb-step0: [2048] first4: 0.013383 -0.012534 0.088655 0.033408
+[Debug] talker-hidden-step1: [2048] first4: 0.132555 2.816141 -0.591259 -0.000489
 [Sample] step=1 c0=1902 u=-1.0000000000 subseq=16
 ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=0 c=1924 u=-1.0000000000 subseq=17
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=1 c=2025 u=-1.0000000000 subseq=18
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=2 c=324 u=-1.0000000000 subseq=19
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=3 c=350 u=-1.0000000000 subseq=20
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=4 c=985 u=-1.0000000000 subseq=21
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=5 c=853 u=-1.0000000000 subseq=22
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=6 c=329 u=-1.0000000000 subseq=23
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=7 c=564 u=-1.0000000000 subseq=24
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=8 c=692 u=-1.0000000000 subseq=25
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=9 c=1702 u=-1.0000000000 subseq=26
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=10 c=437 u=-1.0000000000 subseq=27
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=11 c=729 u=-1.0000000000 subseq=28
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=12 c=344 u=-1.0000000000 subseq=29
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=13 c=85 u=-1.0000000000 subseq=30
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Sample-CP] g=14 c=1668 u=-1.0000000000 subseq=31
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Pipeline] Generated 8 frames
-[Pipeline] Generated 16 frames
-[Pipeline] Generated 24 frames
-[Pipeline] Generated 32 frames
-ggml_backend_cuda_graph_compute: CUDA graph warmup reset
-ggml_backend_cuda_graph_compute: CUDA graph warmup complete
-[Pipeline] Generated 40 frames
-[Pipeline] Generated 48 frames
-[Pipeline] Generated 56 frames
-[Pipeline] Generated 64 frames
+[Pipeline] Generated 8 frames (slot 0)
+[Pipeline] Generated 16 frames (slot 0)
+[Pipeline] Generated 24 frames (slot 0)
+[Pipeline] Generated 32 frames (slot 0)
+[Pipeline] Generated 40 frames (slot 0)
+[Pipeline] Generated 48 frames (slot 0)
+[Pipeline] Generated 56 frames (slot 0)
+[Pipeline] Generated 64 frames (slot 0)
 [Pipeline] Generation done : 64 frames
 [Debug] codes-full: [64, 16] first4: 27.000000 1408.000000 1824.000000 400.000000
-[Debug] output-audio: [122880] first4: 0.000465 0.000259 -0.001065 -0.000736
-[Perf] PromptBuild 1.3 ms
-[Perf] Prefill 13.5 ms (T_ctx prefill)
-[Perf] TTFA 23.3 ms (first frame codes)
-[Perf] TalkerDecode 189.6 ms (64 frames, 2.96 ms/frame)
-[Perf] CodePredictor 304.1 ms (4.75 ms/frame)
+[Debug] output-audio: [122880] first4: 0.000498 0.000316 -0.001016 -0.000733
+[Perf] PromptBuild 1.4 ms
+[Perf] Prefill 22.4 ms (T_ctx prefill)
+[Perf] TTFA 913.7 ms (first frame codes)
+[Perf] TalkerDecode 187.0 ms (64 frames, 2.92 ms/frame)
+[Perf] CodePredictor 259.9 ms (4.06 ms/frame)
 [Perf] HostCompose 0.1 ms (c0 sample + next emb)
-[Perf] CodecDecode 14.7 ms
-[Perf] Total 524.3 ms (64 frames, 7.72 ms/frame AR, audio 5.12 s, RTF 0.102)
+[Perf] CodecDecode 14.9 ms
+[Perf] Total 1368.8 ms (64 frames, 6.98 ms/frame AR, audio 5.12 s, RTF 0.267)
 [WAV] Wrote cpp/clone/clone-cpp.wav: 122880 samples, 24000 Hz, mono S16
 [Pipeline] Wrote 122880 samples (5.12 s) -> cpp/clone/clone-cpp.wav
 [Input] Prompt: 100 chars: qwentts.cpp is a minimal C++17 and GGML port of Qwen3-TTS fo...
@@ -167,19 +121,19 @@ ggml_backend_cuda_graph_compute: CUDA graph warmup complete
 [GGML] Cmd: ../build/qwen-tts --model ../models/qwen-talker-1.7b-base-BF16.gguf --codec ../models/qwen-tokenizer-12hz-BF16.gguf --seed 42 --ref-wav ../examples/freeman.wav --ref-text ../examples/freeman.txt --lang english --max-new 64 --dump cpp/clone -o cpp/clone/clone-cpp.wav --greedy
 [GGML] Audio: 122880 samples 24000 Hz 5.12s -> cpp/clone/clone-cpp.wav
 [Cossim] PromptIDs exact: 100.00% (38 values)
-[Cossim] RefCodes exact: 78.52% (3440 values)
-[Cossim] Embed cos: 0.965578 max: 1.9438e-01 mean: 9.8620e-03
+[Cossim] RefCodes exact: 79.01% (3440 values)
+[Cossim] Embed cos: 0.965841 max: 1.9438e-01 mean: 9.9500e-03
 [Cossim] TrailingText cos: 1.000000 max: 3.5107e-05 mean: 2.5004e-06
 [Cossim] TTSPadEmbed cos: 1.000000 max: 3.5107e-05 mean: 2.5004e-06
-[Cossim] L0 cos: 0.984329 max: 8.0274e-01 mean: 1.3008e-02
-[Cossim] L7 cos: 0.999981 max: 4.7525e+01 mean: 3.1978e-02
-[Cossim] L14 cos: 0.999956 max: 4.7533e+01 mean: 7.0164e-02
-[Cossim] L21 cos: 0.999567 max: 4.7568e+01 mean: 2.6764e-01
-[Cossim] L27 cos: 0.998445 max: 4.7995e+01 mean: 6.0528e-01
-[Cossim] Final cos: 0.991977 max: 1.5200e+01 mean: 1.9679e-01
-[Cossim] Logits cos: 0.999456 max: 1.0356e+00 mean: 1.3007e-01
-[Cossim] NextEmbStep0 cos: 0.829094 max: 1.5468e-01 mean: 2.9154e-02
-[Cossim] TalkerHiddenStep1 cos: 0.992002 max: 2.2514e+00 mean: 2.7397e-01
+[Cossim] L0 cos: 0.984359 max: 7.7032e-01 mean: 1.3103e-02
+[Cossim] L7 cos: 0.999990 max: 1.2875e+01 mean: 3.2110e-02
+[Cossim] L14 cos: 0.999965 max: 1.2878e+01 mean: 6.9459e-02
+[Cossim] L21 cos: 0.999584 max: 1.6917e+01 mean: 2.6241e-01
+[Cossim] L27 cos: 0.998499 max: 4.1020e+01 mean: 5.9180e-01
+[Cossim] Final cos: 0.992242 max: 1.4704e+01 mean: 1.9250e-01
+[Cossim] Logits cos: 0.999487 max: 9.8101e-01 mean: 1.2576e-01
+[Cossim] NextEmbStep0 cos: 0.832386 max: 1.5622e-01 mean: 2.8598e-02
+[Cossim] TalkerHiddenStep1 cos: 0.993512 max: 2.0032e+00 mean: 2.4247e-01
 [Cossim] MelHann cos: 1.000000 max: 1.7881e-07 mean: 3.2043e-08
 [Cossim] MelBasis cos: 1.000000 max: 1.7881e-07 mean: 3.9379e-10
 [Cossim] MelMag cos: 1.000000 max: 3.1307e-05 mean: 5.6396e-07
@@ -190,13 +144,13 @@ ggml_backend_cuda_graph_compute: CUDA graph warmup complete
 [Cossim] SeanetStage1 cos: 0.999862 max: 7.2425e-01 mean: 5.3037e-03
 [Cossim] SeanetStage3 cos: 0.999994 max: 2.1089e+00 mean: 4.7947e-02
 [Cossim] SeanetOut cos: 0.999953 max: 3.2791e-01 mean: 2.0392e-02
-[Cossim] EncTransformer cos: 0.999956 max: 1.1787e+00 mean: 1.1794e-02
-[Cossim] CodecPreFSQ cos: 0.999960 max: 4.7962e-01 mean: 2.3320e-02
-[Cossim] SpkFrontend cos: 0.999995 max: 3.5096e-02 mean: 1.0924e-03
-[Cossim] SpkBlock3 cos: 0.999987 max: 1.3367e-01 mean: 4.9918e-03
-[Cossim] SpkMFA cos: 0.999973 max: 7.5789e-02 mean: 1.1867e-03
-[Cossim] SpkASP cos: 0.999999 max: 3.9836e-03 mean: 2.4063e-04
-[Cossim] SpeakerEmb cos: 1.000000 max: 1.7091e-03 mean: 2.1396e-04
-[Cossim] CodesFull exact: 5.85% (1008 values)
-[Cossim] Audio cos: 0.030355
-[Cossim] WAV stft_cos: 0.297198 samples: 120960
+[Cossim] EncTransformer cos: 0.999962 max: 7.5433e-01 mean: 1.0610e-02
+[Cossim] CodecPreFSQ cos: 0.999962 max: 4.7767e-01 mean: 2.2384e-02
+[Cossim] SpkFrontend cos: 1.000000 max: 2.1511e-04 mean: 1.4495e-06
+[Cossim] SpkBlock3 cos: 1.000000 max: 3.2926e-04 mean: 4.3974e-06
+[Cossim] SpkMFA cos: 1.000000 max: 3.8069e-04 mean: 1.3195e-06
+[Cossim] SpkASP cos: 1.000000 max: 7.9870e-06 mean: 2.2269e-07
+[Cossim] SpeakerEmb cos: 1.000000 max: 1.4305e-05 mean: 2.5463e-07
+[Cossim] CodesFull exact: 2.08% (1008 values)
+[Cossim] Audio cos: 0.022055
+[Cossim] WAV stft_cos: 0.185286 samples: 120960
