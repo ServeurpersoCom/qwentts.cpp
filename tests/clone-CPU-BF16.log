@@ -1,4 +1,4 @@
-[Qwen] qwentts.cpp 53c84fe (2026-07-20)
+[Qwen] qwentts.cpp 521503f (2026-07-20)
 ggml_cuda_init: found 1 CUDA devices (Total VRAM: 97247 MiB):
   Device 0: NVIDIA RTX PRO 6000 Blackwell Workstation Edition, compute capability 12.0, VMM: yes, VRAM: 97247 MiB
 load_backend: loaded CUDA backend from /mnt/workspace/git/qwentts.cpp/build/libggml-cuda.so
@@ -33,7 +33,7 @@ load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libgg
 [Audio-Resample] Done: 380672 -> 414337 samples
 [WeightCtx] Loaded 76 tensors, 34.9 MB into backend
 [SpeakerEncoder] Loaded: enc_dim=2048 sr=24000 mel_dim=128 hidden=512 mfa=1536 asp_attn=128 se=128 scale=8
-[Pipeline] Speaker encoder lazy loaded in 6 ms
+[Pipeline] Speaker encoder lazy loaded in 3 ms
 [Debug] mel-spk: [1618, 128] first4: -6.330339 -6.170074 -6.011195 -6.243161
 [Debug] mel-hann: [1024] first4: 0.000000 0.000009 0.000038 0.000085
 [Debug] mel-basis: [128, 513] first4: 0.000000 0.033550 0.008569 0.000000
@@ -51,7 +51,7 @@ load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libgg
 [EncDownsample] Loaded: k=4 stride=2, 512 -> 512 channels, weights 2.0 MB
 [WeightCtx] Loaded 20 tensors, 34.0 MB into backend
 [EncQuantizer] Loaded: 16 codebooks (1 semantic + 15 acoustic), 2048 entries x 256 dim, hidden 512, weights 34.0 MB
-[Pipeline] Codec encoder lazy loaded in 53 ms
+[Pipeline] Codec encoder lazy loaded in 43 ms
 [Debug] audio-input: [412800] first4: -0.000546 -0.001162 -0.000871 0.000340
 [Debug] seanet-out: [430, 512] first4: -0.112500 13.760122 -0.329032 2.993861
 [Debug] enc-transformer-out: [430, 512] first4: 0.526661 3.208130 -0.164395 0.605249
@@ -76,7 +76,7 @@ load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libgg
 [Debug] talker-hidden-prefill-l27: [225, 2048] first4: 7.054070 -34.409252 -7.069129 28.624571
 [Debug] talker-hidden-prefill-final: [225, 2048] first4: 0.240086 -1.222942 -0.223565 0.888025
 [Debug] talker-logits-prefill: [3072] first4: 1.339535 -7.642556 -6.988994 -10.529062
-[Batch] Admit slot=0 T_ctx=225 prefill=391.8 ms build=2.3 ms (stall for 0 active slots)
+[Batch] Admit slot=0 T_ctx=225 prefill=384.7 ms build=2.5 ms (stall for 0 active slots)
 [Sample] step=0 c0=27 u=-1.0000000000 subseq=0
 [Debug] codes-step0: [16] first4: 27.000000 1408.000000 1824.000000 400.000000
 [Debug] next-emb-step0: [2048] first4: 0.073552 -0.034240 -0.008814 0.042007
@@ -93,14 +93,14 @@ load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libgg
 [Pipeline] Generation done : 64 frames
 [Debug] codes-full: [64, 16] first4: 27.000000 1408.000000 1824.000000 400.000000
 [Debug] output-audio: [122880] first4: 0.000529 0.000353 -0.000865 -0.000453
-[Perf] PromptBuild 2.3 ms
-[Perf] Prefill 391.8 ms (T_ctx prefill)
-[Perf] TTFA 1549.7 ms (first frame codes)
-[Perf] TalkerDecode 2864.7 ms (64 frames, 44.76 ms/frame)
-[Perf] CodePredictor 1446.2 ms (22.60 ms/frame)
+[Perf] PromptBuild 2.5 ms
+[Perf] Prefill 384.7 ms (T_ctx prefill)
+[Perf] TTFA 1506.9 ms (first frame codes)
+[Perf] TalkerDecode 2886.2 ms (64 frames, 45.10 ms/frame)
+[Perf] CodePredictor 1518.3 ms (23.72 ms/frame)
 [Perf] HostCompose 0.1 ms (c0 sample + next emb)
-[Perf] CodecDecode 1112.5 ms
-[Perf] Total 6949.6 ms (64 frames, 67.36 ms/frame AR, audio 5.12 s, RTF 1.357)
+[Perf] CodecDecode 968.0 ms
+[Perf] Total 6854.8 ms (64 frames, 68.82 ms/frame AR, audio 5.12 s, RTF 1.339)
 [WAV] Wrote cpp/clone/clone-cpp.wav: 122880 samples, 24000 Hz, mono S16
 [Pipeline] Wrote 122880 samples (5.12 s) -> cpp/clone/clone-cpp.wav
 [Input] Prompt: 100 chars: qwentts.cpp is a minimal C++17 and GGML port of Qwen3-TTS fo...

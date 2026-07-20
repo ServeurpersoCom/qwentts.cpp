@@ -1,4 +1,4 @@
-[Qwen] qwentts.cpp 53c84fe (2026-07-20)
+[Qwen] qwentts.cpp 521503f (2026-07-20)
 ggml_cuda_init: found 1 CUDA devices (Total VRAM: 97247 MiB):
   Device 0: NVIDIA RTX PRO 6000 Blackwell Workstation Edition, compute capability 12.0, VMM: yes, VRAM: 97247 MiB
 load_backend: loaded CUDA backend from /mnt/workspace/git/qwentts.cpp/build/libggml-cuda.so
@@ -51,7 +51,7 @@ load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libgg
 [EncDownsample] Loaded: k=4 stride=2, 512 -> 512 channels, weights 2.0 MB
 [WeightCtx] Loaded 20 tensors, 34.0 MB into backend
 [EncQuantizer] Loaded: 16 codebooks (1 semantic + 15 acoustic), 2048 entries x 256 dim, hidden 512, weights 34.0 MB
-[Pipeline] Codec encoder lazy loaded in 46 ms
+[Pipeline] Codec encoder lazy loaded in 45 ms
 [Debug] audio-input: [412800] first4: -0.000546 -0.001162 -0.000871 0.000340
 [Debug] seanet-out: [430, 512] first4: -0.110593 13.765666 -0.317055 2.981106
 [Debug] enc-transformer-out: [430, 512] first4: 0.536260 3.195749 -0.156796 0.610111
@@ -76,51 +76,33 @@ load_backend: loaded CPU backend from /mnt/workspace/git/qwentts.cpp/build/libgg
 [Debug] talker-hidden-prefill-l27: [225, 2048] first4: 7.051195 -34.399265 -7.070650 28.631254
 [Debug] talker-hidden-prefill-final: [225, 2048] first4: 0.239991 -1.222603 -0.223616 0.888243
 [Debug] talker-logits-prefill: [3072] first4: 0.882721 -7.881639 -6.796915 -10.414125
-[Batch] Admit slot=0 T_ctx=225 prefill=32.2 ms build=2.1 ms (stall for 0 active slots)
+[Batch] Admit slot=0 T_ctx=225 prefill=31.9 ms build=2.0 ms (stall for 0 active slots)
 [Sample] step=0 c0=27 u=-1.0000000000 subseq=0
 [Debug] codes-step0: [16] first4: 27.000000 1408.000000 1824.000000 400.000000
 [Debug] next-emb-step0: [2048] first4: -0.008599 -0.015697 0.093591 0.086640
-/mnt/workspace/git/qwentts.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp:11497: GGML_ASSERT(dst->op != GGML_OP_GET_ROWS || (a_offset == 0 && b_offset == 0 && d_offset == 0)) failed
-[New LWP 121432]
-[New LWP 121431]
-[New LWP 121430]
-[New LWP 121429]
-[New LWP 121428]
-[New LWP 121427]
-[New LWP 121426]
-[New LWP 121425]
-[New LWP 121424]
-[New LWP 121423]
-[New LWP 121422]
-[New LWP 121421]
-[New LWP 121420]
-[New LWP 121419]
-[New LWP 121418]
-[New LWP 121417]
-[New LWP 121416]
-[New LWP 121415]
-[New LWP 121414]
-[New LWP 121413]
-[Thread debugging using libthread_db enabled]
-Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
-0x00007f5e576799ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
-#0  0x00007f5e576799ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
-#1  0x00007f5e5766e668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
-#2  0x00007f5e5766e6ad in ?? () from /lib/x86_64-linux-gnu/libc.so.6
-#3  0x00007f5e576d97c7 in wait4 () from /lib/x86_64-linux-gnu/libc.so.6
-#4  0x00007f5e57b89a93 in ggml_print_backtrace () from /mnt/workspace/git/qwentts.cpp/build/libggml-base.so.0
-#5  0x00007f5e57b89bfe in ggml_abort () from /mnt/workspace/git/qwentts.cpp/build/libggml-base.so.0
-#6  0x00007f5c0e2d4bf1 in void init_pushconst_tensor_offsets<vk_op_binary_push_constants>(ggml_backend_vk_context*, vk_op_binary_push_constants&, ggml_tensor const*, ggml_tensor const*, ggml_tensor const*, ggml_tensor const*, ggml_tensor*) () from /mnt/workspace/git/qwentts.cpp/build/libggml-vulkan.so
-#7  0x00007f5c0e449201 in void ggml_vk_op_f32<vk_op_binary_push_constants>(ggml_backend_vk_context*, std::shared_ptr<vk_context_struct>&, ggml_tensor const*, ggml_tensor const*, ggml_tensor const*, ggml_tensor const*, ggml_tensor*, ggml_op, vk_op_binary_push_constants&&) [clone .constprop.0] () from /mnt/workspace/git/qwentts.cpp/build/libggml-vulkan.so
-#8  0x00007f5c0e464f48 in ggml_vk_build_graph(ggml_backend_vk_context*, ggml_cgraph*, int, ggml_tensor*, int, bool, bool, bool) [clone .isra.0] () from /mnt/workspace/git/qwentts.cpp/build/libggml-vulkan.so
-#9  0x00007f5c0e4679bc in ggml_backend_vk_graph_compute(ggml_backend*, ggml_cgraph*) () from /mnt/workspace/git/qwentts.cpp/build/libggml-vulkan.so
-#10 0x00007f5e57ba196e in ggml_backend_graph_compute () from /mnt/workspace/git/qwentts.cpp/build/libggml-base.so.0
-#11 0x000055bbb3e94365 in tts_engine_step(TtsEngine*, std::vector<TtsJob*, std::allocator<TtsJob*> >*) ()
-#12 0x000055bbb3ea166a in pipeline_tts_synthesize(PipelineTTS*, BPETokenizer*, qt_tts_params const*, long, qt_audio*) ()
-#13 0x000055bbb3e7db80 in qt_synthesize ()
-#14 0x000055bbb3e74cdd in run(Args const&) ()
-#15 0x000055bbb3e72a83 in main ()
-[Inferior 1 (process 121412) detached]
+[Debug] talker-hidden-step1: [2048] first4: 0.466706 2.304709 -0.154099 0.228768
+[Sample] step=1 c0=1902 u=-1.0000000000 subseq=16
+[Pipeline] Generated 8 frames (slot 0)
+[Pipeline] Generated 16 frames (slot 0)
+[Pipeline] Generated 24 frames (slot 0)
+[Pipeline] Generated 32 frames (slot 0)
+[Pipeline] Generated 40 frames (slot 0)
+[Pipeline] Generated 48 frames (slot 0)
+[Pipeline] Generated 56 frames (slot 0)
+[Pipeline] Generated 64 frames (slot 0)
+[Pipeline] Generation done : 64 frames
+[Debug] codes-full: [64, 16] first4: 27.000000 1408.000000 1824.000000 400.000000
+[Debug] output-audio: [122880] first4: 0.000515 0.000357 -0.000915 -0.000575
+[Perf] PromptBuild 2.0 ms
+[Perf] Prefill 31.9 ms (T_ctx prefill)
+[Perf] TTFA 812.5 ms (first frame codes)
+[Perf] TalkerDecode 212.2 ms (64 frames, 3.32 ms/frame)
+[Perf] CodePredictor 374.8 ms (5.86 ms/frame)
+[Perf] HostCompose 0.1 ms (c0 sample + next emb)
+[Perf] CodecDecode 32.1 ms
+[Perf] Total 1425.9 ms (64 frames, 9.18 ms/frame AR, audio 5.12 s, RTF 0.278)
+[WAV] Wrote cpp/clone/clone-cpp.wav: 122880 samples, 24000 Hz, mono S16
+[Pipeline] Wrote 122880 samples (5.12 s) -> cpp/clone/clone-cpp.wav
 [Input] Prompt: 100 chars: qwentts.cpp is a minimal C++17 and GGML port of Qwen3-TTS fo...
 [Input] RefAudio: ../examples/freeman.wav
 [Input] RefText: 213 chars: If you go into different cultures, they have different conce...
@@ -136,3 +118,38 @@ Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
 [Python] Audio: 120960 samples 24000 Hz 5.04s -> python/clone/clone-python.wav
 [Quant] BF16 -> ../models/qwen-talker-1.7b-base-BF16.gguf + ../models/qwen-tokenizer-12hz-BF16.gguf
 [GGML] Cmd: ../build/qwen-tts --model ../models/qwen-talker-1.7b-base-BF16.gguf --codec ../models/qwen-tokenizer-12hz-BF16.gguf --seed 42 --ref-wav ../examples/freeman.wav --ref-text ../examples/freeman.txt --lang english --max-new 64 --dump cpp/clone -o cpp/clone/clone-cpp.wav --greedy
+[GGML] Audio: 122880 samples 24000 Hz 5.12s -> cpp/clone/clone-cpp.wav
+[Cossim] PromptIDs exact: 100.00% (38 values)
+[Cossim] RefCodes exact: 76.83% (3440 values)
+[Cossim] Embed cos: 0.962709 max: 1.9437e-01 mean: 1.0689e-02
+[Cossim] TrailingText cos: 1.000000 max: 2.9802e-08 mean: 6.7932e-10
+[Cossim] TTSPadEmbed cos: 1.000000 max: 2.9802e-08 mean: 6.7932e-10
+[Cossim] L0 cos: 0.983221 max: 7.7030e-01 mean: 1.3992e-02
+[Cossim] L7 cos: 0.999989 max: 1.2884e+01 mean: 3.3235e-02
+[Cossim] L14 cos: 0.999964 max: 1.2886e+01 mean: 7.1843e-02
+[Cossim] L21 cos: 0.999531 max: 1.6955e+01 mean: 2.8087e-01
+[Cossim] L27 cos: 0.998209 max: 4.0700e+01 mean: 6.4207e-01
+[Cossim] Final cos: 0.990658 max: 1.5839e+01 mean: 2.0917e-01
+[Cossim] Logits cos: 0.999301 max: 1.1222e+00 mean: 1.3438e-01
+[Cossim] NextEmbStep0 cos: 0.818255 max: 1.4225e-01 mean: 3.0455e-02
+[Cossim] TalkerHiddenStep1 cos: 0.993880 max: 1.7297e+00 mean: 2.3463e-01
+[Cossim] MelHann cos: 1.000000 max: 1.7881e-07 mean: 3.2043e-08
+[Cossim] MelBasis cos: 1.000000 max: 1.7881e-07 mean: 3.9379e-10
+[Cossim] MelMag cos: 1.000000 max: 3.1307e-05 mean: 5.6396e-07
+[Cossim] MelSpk cos: 1.000000 max: 2.5492e-03 mean: 9.3754e-06
+[Cossim] SeanetInit cos: 1.000000 max: 9.1669e-04 mean: 1.6221e-05
+[Cossim] SeanetResnet0 cos: 0.999961 max: 2.1108e-03 mean: 1.6910e-04
+[Cossim] SeanetStage0 cos: 0.999983 max: 4.4128e-02 mean: 7.5091e-04
+[Cossim] SeanetStage1 cos: 0.999862 max: 7.2962e-01 mean: 5.2996e-03
+[Cossim] SeanetStage3 cos: 0.999994 max: 2.1304e+00 mean: 4.7641e-02
+[Cossim] SeanetOut cos: 0.999953 max: 3.4988e-01 mean: 2.0273e-02
+[Cossim] EncTransformer cos: 0.999963 max: 8.5211e-01 mean: 1.0424e-02
+[Cossim] CodecPreFSQ cos: 0.999962 max: 4.6668e-01 mean: 2.2088e-02
+[Cossim] SpkFrontend cos: 0.999997 max: 2.5180e-02 mean: 9.4975e-04
+[Cossim] SpkBlock3 cos: 0.999991 max: 1.0191e-01 mean: 4.1519e-03
+[Cossim] SpkMFA cos: 0.999979 max: 7.0797e-02 mean: 1.0369e-03
+[Cossim] SpkASP cos: 1.000000 max: 2.3533e-03 mean: 1.4947e-04
+[Cossim] SpeakerEmb cos: 1.000000 max: 6.7258e-04 mean: 1.2809e-04
+[Cossim] CodesFull exact: 2.28% (1008 values)
+[Cossim] Audio cos: 0.003079
+[Cossim] WAV stft_cos: 0.208123 samples: 120960
