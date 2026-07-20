@@ -294,12 +294,15 @@ static struct ggml_tensor * tok_trans_forward(struct ggml_context *            c
     return h;
 }
 
-// Streaming layer forward: the fresh K and V rows write into a
-// persistent ring cache via set_rows at the slots carried by kv_rows,
-// and the attention reads the whole ring with the mask killing every
-// slot outside the sliding window. Ring slots hold RoPE rotated keys at
-// absolute positions, so relative attention falls out as usual. The
-// graph topology is constant across steps: pure CUDA graph replay.
+// Streaming layer forward, batched over N lanes: the fresh K and V
+// rows of every lane write into its own KV ring set via set_rows at
+// the slots carried by kv_rows [T, 1, N], and the attention reads the
+// whole ring of the [0, N) set span with the mask [ring, T, 1, N]
+// killing every slot outside each lane's sliding window. Ring slots
+// hold RoPE rotated keys at absolute positions (per lane, through the
+// flattened positions [T * N]), so relative attention falls out as
+// usual. The graph topology is constant across steps: pure CUDA graph
+// replay.
 static struct ggml_tensor * tok_trans_layer_forward_stream(struct ggml_context *            ctx,
                                                            struct ggml_cgraph *             gf,
                                                            const QwenTokenizerTransformer * tr,
@@ -308,13 +311,15 @@ static struct ggml_tensor * tok_trans_layer_forward_stream(struct ggml_context *
                                                            struct ggml_tensor *             positions,
                                                            struct ggml_tensor *             mask,
                                                            struct ggml_tensor *             kv_rows,
-                                                           struct ggml_tensor *             k_cache,
-                                                           struct ggml_tensor *             v_cache,
+                                                           struct ggml_tensor *             k4,
+                                                           struct ggml_tensor *             v4,
                                                            int                              T,
+                                                           int                              N,
                                                            int                              ring) {
     int n_q_heads = tr->num_attention_heads;
     int n_kv      = tr->num_kv_heads;
     int hd        = tr->head_dim;
+    int TN        = T * N;
 
     struct ggml_tensor * ln1 = ggml_rms_norm(ctx, x, tr->rms_norm_eps);
     ln1                      = ggml_mul(ctx, ln1, layer.input_norm_w);
@@ -323,42 +328,45 @@ static struct ggml_tensor * tok_trans_layer_forward_stream(struct ggml_context *
     struct ggml_tensor * k = ggml_mul_mat(ctx, layer.attn.k_proj_w, ln1);
     struct ggml_tensor * v = ggml_mul_mat(ctx, layer.attn.v_proj_w, ln1);
 
-    q = ggml_reshape_3d(ctx, q, hd, n_q_heads, T);
-    k = ggml_reshape_3d(ctx, k, hd, n_kv, T);
-    v = ggml_reshape_3d(ctx, v, hd, n_kv, T);
+    q = ggml_reshape_3d(ctx, q, hd, n_q_heads, TN);
+    k = ggml_reshape_3d(ctx, k, hd, n_kv, TN);
+    v = ggml_reshape_3d(ctx, v, hd, n_kv, TN);
 
     q = ggml_rope_ext(ctx, q, positions, NULL, hd, GGML_ROPE_TYPE_NEOX, 0, tr->rope_theta, 1.0f, 0.0f, 1.0f, 0.0f,
                       0.0f);
     k = ggml_rope_ext(ctx, k, positions, NULL, hd, GGML_ROPE_TYPE_NEOX, 0, tr->rope_theta, 1.0f, 0.0f, 1.0f, 0.0f,
                       0.0f);
 
-    // Ring write: [hd, T, n_kv] rows land at kv_rows, ids broadcast
-    // across the head dim.
-    struct ggml_tensor * k_perm = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
-    struct ggml_tensor * v_perm = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
-    ggml_build_forward_expand(gf, ggml_set_rows(ctx, k_cache, k_perm, kv_rows));
-    ggml_build_forward_expand(gf, ggml_set_rows(ctx, v_cache, v_perm, kv_rows));
+    // Ring write: [hd, T, n_kv, N] rows land at each lane's set through
+    // the kv_rows [T, 1, N] destinations, ids broadcast across the
+    // head dim; k4/v4 are the [0, N) set span views of the ring.
+    struct ggml_tensor * k_perm =
+        ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, k, hd, n_kv, T, N), 0, 2, 1, 3));
+    struct ggml_tensor * v_perm =
+        ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, v, hd, n_kv, T, N), 0, 2, 1, 3));
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, k4, k_perm, kv_rows));
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, v4, v_perm, kv_rows));
 
-    struct ggml_tensor * q_p = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
+    struct ggml_tensor * q_p =
+        ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, q, hd, n_q_heads, T, N), 0, 2, 1, 3));
 
-    struct ggml_tensor * k_full = ggml_view_3d(ctx, k_cache, hd, ring, n_kv, k_cache->nb[1], k_cache->nb[2], 0);
-    struct ggml_tensor * v_full = ggml_view_3d(ctx, v_cache, hd, ring, n_kv, v_cache->nb[1], v_cache->nb[2], 0);
-
-    struct ggml_tensor * scores = ggml_mul_mat(ctx, k_full, q_p);  // [ring, T, n_q_heads]
+    struct ggml_tensor * scores = ggml_mul_mat(ctx, k4, q_p);  // [ring, T, n_q_heads, N]
 
     float scale = 1.0f / sqrtf((float) hd);
     scores      = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f);
 
-    struct ggml_tensor * vt   = ggml_cont(ctx, ggml_transpose(ctx, v_full));  // [ring, hd, n_kv]
-    struct ggml_tensor * attn = ggml_mul_mat(ctx, vt, scores);                // [hd, T, n_q_heads]
+    struct ggml_tensor * vt   = ggml_cont(ctx, ggml_transpose(ctx, v4));  // [ring, hd, n_kv, N]
+    struct ggml_tensor * attn = ggml_mul_mat(ctx, vt, scores);            // [hd, T, n_q_heads, N]
 
-    attn = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3));
-    attn = ggml_reshape_2d(ctx, attn, n_q_heads * hd, T);
+    attn = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3));           // [hd, n_q_heads, T, N]
+    attn = ggml_reshape_2d(ctx, attn, n_q_heads * hd, TN);
 
     struct ggml_tensor * o = ggml_mul_mat(ctx, layer.attn.o_proj_w, attn);
 
     o = ggml_mul(ctx, o, layer.attn_scale);
     x = ggml_add(ctx, x, o);
+
+    (void) ring;
 
     struct ggml_tensor * ln2 = ggml_rms_norm(ctx, x, tr->rms_norm_eps);
     ln2                      = ggml_mul(ctx, ln2, layer.post_attn_norm_w);
@@ -376,10 +384,15 @@ static struct ggml_tensor * tok_trans_layer_forward_stream(struct ggml_context *
     return x;
 }
 
-// Streaming transformer forward over a persistent KV ring. kv holds one
-// [hd, ring, n_kv] pair per layer; kv_rows carries the ring slots the T
-// fresh positions land in; mask is [ring, T] f32 with 0 on the slots
-// inside the causal sliding window and neg inf elsewhere.
+// Streaming transformer forward over the persistent KV ring, batched
+// over N lanes. Lane n reads and writes KV set n; k4/v4 span views
+// over sets [0, N) build here from the 4D ring tensors. kv_rows
+// [T, 1, N] carries the ring slots the T fresh positions of every lane
+// land in; positions is the flattened [T * N] per lane absolute
+// positions; mask is [ring, T, 1, N] f32 with 0 on the slots inside
+// each lane's causal sliding window and neg inf elsewhere.
+//   x: [in_dim, T, N] f32 C-first
+// Returns [out_dim, T, N] f32 C-first.
 static struct ggml_tensor * tok_trans_forward_stream(struct ggml_context *            ctx,
                                                      struct ggml_cgraph *             gf,
                                                      const QwenTokenizerTransformer * tr,
@@ -387,16 +400,23 @@ static struct ggml_tensor * tok_trans_forward_stream(struct ggml_context *      
                                                      struct ggml_tensor *             positions,
                                                      struct ggml_tensor *             mask,
                                                      struct ggml_tensor *             kv_rows,
-                                                     KVCache *                        kv) {
+                                                     KVCache *                        kv,
+                                                     int                              N) {
     int T    = (int) x->ne[1];
     int ring = kv->max_seq_len;
 
     struct ggml_tensor * h = ggml_mul_mat(ctx, tr->input_proj_w, x);
     h                      = ggml_add(ctx, h, tr->input_proj_b);
+    h                      = ggml_reshape_2d(ctx, h, h->ne[0], (int64_t) T * N);
 
     for (int l = 0; l < tr->num_layers; l++) {
-        h = tok_trans_layer_forward_stream(ctx, gf, tr, tr->layers[l], h, positions, mask, kv_rows,
-                                           kv_cache_k(kv, 0, l), kv_cache_v(kv, 0, l), T, ring);
+        struct ggml_tensor * k4l = kv->k4[(size_t) l];
+        struct ggml_tensor * v4l = kv->v4[(size_t) l];
+        struct ggml_tensor * k4 =
+            ggml_view_4d(ctx, k4l, k4l->ne[0], ring, k4l->ne[2], N, k4l->nb[1], k4l->nb[2], k4l->nb[3], 0);
+        struct ggml_tensor * v4 =
+            ggml_view_4d(ctx, v4l, v4l->ne[0], ring, v4l->ne[2], N, v4l->nb[1], v4l->nb[2], v4l->nb[3], 0);
+        h = tok_trans_layer_forward_stream(ctx, gf, tr, tr->layers[l], h, positions, mask, kv_rows, k4, v4, T, N, ring);
     }
 
     h = ggml_rms_norm(ctx, h, tr->rms_norm_eps);
@@ -405,22 +425,70 @@ static struct ggml_tensor * tok_trans_forward_stream(struct ggml_context *      
     h = ggml_mul_mat(ctx, tr->output_proj_w, h);
     h = ggml_add(ctx, h, tr->output_proj_b);
 
-    return h;
+    return ggml_reshape_3d(ctx, h, h->ne[0], T, N);
 }
 
-// Ring mask for the streaming path: [ring, T] f32, row q carries 0 on
-// the ring slots holding positions inside [pos_q - window + 1, pos_q]
-// and neg inf everywhere else, padded and future slots included.
-static void tok_trans_build_stream_mask(int pos0, int T, int ring, int sliding_window, std::vector<float> & dst) {
-    dst.assign((size_t) ring * (size_t) T, -INFINITY);
-    for (int q = 0; q < T; q++) {
-        int pos_q = pos0 + q;
-        int k_min = pos_q - sliding_window + 1;
-        if (k_min < 0) {
-            k_min = 0;
-        }
-        for (int p = k_min; p <= pos_q; p++) {
-            dst[(size_t) q * (size_t) ring + (size_t) (p % ring)] = 0.0f;
+// Set span variant: identical to tok_trans_forward_stream with the
+// [set0, set0 + N) span of the ring instead of [0, N), so the staging
+// graphs bind the last set with the same code path.
+static struct ggml_tensor * tok_trans_forward_stream_span(struct ggml_context *            ctx,
+                                                          struct ggml_cgraph *             gf,
+                                                          const QwenTokenizerTransformer * tr,
+                                                          struct ggml_tensor *             x,
+                                                          struct ggml_tensor *             positions,
+                                                          struct ggml_tensor *             mask,
+                                                          struct ggml_tensor *             kv_rows,
+                                                          KVCache *                        kv,
+                                                          int                              set0,
+                                                          int                              N) {
+    int T    = (int) x->ne[1];
+    int ring = kv->max_seq_len;
+
+    struct ggml_tensor * h = ggml_mul_mat(ctx, tr->input_proj_w, x);
+    h                      = ggml_add(ctx, h, tr->input_proj_b);
+    h                      = ggml_reshape_2d(ctx, h, h->ne[0], (int64_t) T * N);
+
+    for (int l = 0; l < tr->num_layers; l++) {
+        struct ggml_tensor * k4l = kv->k4[(size_t) l];
+        struct ggml_tensor * v4l = kv->v4[(size_t) l];
+        struct ggml_tensor * k4  = ggml_view_4d(ctx, k4l, k4l->ne[0], ring, k4l->ne[2], N, k4l->nb[1], k4l->nb[2],
+                                                k4l->nb[3], (size_t) set0 * k4l->nb[3]);
+        struct ggml_tensor * v4  = ggml_view_4d(ctx, v4l, v4l->ne[0], ring, v4l->ne[2], N, v4l->nb[1], v4l->nb[2],
+                                                v4l->nb[3], (size_t) set0 * v4l->nb[3]);
+        h = tok_trans_layer_forward_stream(ctx, gf, tr, tr->layers[l], h, positions, mask, kv_rows, k4, v4, T, N, ring);
+    }
+
+    h = ggml_rms_norm(ctx, h, tr->rms_norm_eps);
+    h = ggml_mul(ctx, h, tr->norm_w);
+
+    h = ggml_mul_mat(ctx, tr->output_proj_w, h);
+    h = ggml_add(ctx, h, tr->output_proj_b);
+
+    return ggml_reshape_3d(ctx, h, h->ne[0], T, N);
+}
+
+// Ring mask for the batched streaming path: [ring, T, 1, N] f32, lane
+// n row q carries 0 on the ring slots holding positions inside
+// [pos_q - window + 1, pos_q] of that lane and neg inf everywhere
+// else, padded and future slots included. pos0 holds the absolute
+// start position of every lane.
+static void tok_trans_build_stream_mask(const int *          pos0,
+                                        int                  T,
+                                        int                  N,
+                                        int                  ring,
+                                        int                  sliding_window,
+                                        std::vector<float> & dst) {
+    dst.assign((size_t) ring * (size_t) T * (size_t) N, -INFINITY);
+    for (int n = 0; n < N; n++) {
+        for (int q = 0; q < T; q++) {
+            int pos_q = pos0[n] + q;
+            int k_min = pos_q - sliding_window + 1;
+            if (k_min < 0) {
+                k_min = 0;
+            }
+            for (int p = k_min; p <= pos_q; p++) {
+                dst[((size_t) n * (size_t) T + (size_t) q) * (size_t) ring + (size_t) (p % ring)] = 0.0f;
+            }
         }
     }
 }

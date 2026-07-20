@@ -273,8 +273,9 @@ struct QwenDACStreamState {
     struct ggml_tensor * post;                               // conv_post k=7, [6, 96]
 };
 
-// Streaming residual unit: conv1 reads its left context from the
-// persistent state, conv2 is pointwise.
+// Streaming residual unit, batched over N lanes: conv1 reads its left
+// context from the persistent state, conv2 is pointwise (k=1, pad
+// free) and runs a direct batched conv.
 static struct ggml_tensor * dac_res_unit_stream(struct ggml_context *  ctx,
                                                 struct ggml_cgraph *   gf,
                                                 const QwenDACResUnit * ru,
@@ -284,7 +285,11 @@ static struct ggml_tensor * dac_res_unit_stream(struct ggml_context *  ctx,
     x                         = dac_snake(ctx, x, ru->act1);
     x                         = qwen_causal_conv1d_stream(ctx, gf, ru->c1w, ru->c1b, x, 7, ru->dilation, state);
     x                         = dac_snake(ctx, x, ru->act2);
-    x                         = qwen_causal_conv1d(ctx, ru->c2w, ru->c2b, x, 1, 1);
+    x                         = ggml_conv_1d(ctx, ru->c2w, x, 1, 0, 1);
+    if (ru->c2b) {
+        struct ggml_tensor * b2d = ggml_reshape_2d(ctx, ru->c2b, 1, ru->c2b->ne[0]);
+        x                        = ggml_add(ctx, x, b2d);
+    }
     return ggml_add(ctx, skip, x);
 }
 

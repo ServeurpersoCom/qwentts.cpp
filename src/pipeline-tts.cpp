@@ -204,6 +204,10 @@ bool pipeline_tts_load(PipelineTTS * pt,
         gf_close(&pt->gguf_talker);
         return false;
     }
+    // One codec stream state set per lane plus the staging set for ICL
+    // reference priming; must land before the first stream call, which
+    // allocates the [t, c, S] state tensors from it.
+    pt->codec.stream_sets = pt->max_batch + 1;
 
     // Scheduler shared by talker_forward_* and code_predictor_step.
     // Routes ops the GPU backend cannot run (typical case: K-quant
@@ -509,11 +513,11 @@ struct TtsSlot {
     int                  pending_c0;      // c0 of the frame in flight
     bool                 has_frame;       // slot emits a frame this engine step
 
-    // Streaming state: the per slot codec stream mirror parks in snap
-    // whenever another slot takes the live codec state.
+    // Streaming state: the slot's codec stream lane, an index into the
+    // compacted [0, codec_M) span of the shared multi set codec state.
+    // -1 for buffered and wav slots.
     bool                              streaming;
-    codec_stream_decoder              stream;
-    CodecStateSnap                    snap;
+    int                               codec_set;
     std::vector<std::vector<int32_t>> all_codes;
 
     bool      finished;
@@ -527,26 +531,45 @@ struct TtsEngine {
     BPETokenizer *       tok;
     std::vector<TtsSlot> slots;
     int64_t              next_serial;
-    int64_t              stream_owner;  // serial of the slot holding the live codec state, -1 none
+
+    // Shared codec streaming ramp, lockstep over the compacted lanes
+    // [0, codec_M): every streaming slot accumulates into the same
+    // pending rows and flushes through one batched graph compute, so
+    // the 8x kernel amortization survives multi lane operation. An
+    // admit resets the ramp to 1 for the new lane's first audio
+    // latency; a retirement drains the pending rows first so the
+    // leaving lane's audio is fully dispatched before the swap remove.
+    int                  codec_M;          // active streaming lanes
+    int                  codec_target;     // current ramp chunk width
+    int                  codec_pending_n;  // rows accumulated, < codec_target
+    std::vector<int32_t> codec_pending;    // [row][lane][K] frame rows
+    std::vector<uint8_t> codec_live;       // per lane: rows are real frames
+    std::vector<int32_t> codec_codes;      // [T, K, M] flush upload layout
+    std::vector<float>   codec_audio;      // [lane][8 * hop] flush output
+    std::vector<float *> codec_outs;       // per lane out or NULL
 };
 
 TtsEngine * tts_engine_new(PipelineTTS * pt, BPETokenizer * tok) {
-    TtsEngine * e   = new TtsEngine();
-    e->pt           = pt;
-    e->tok          = tok;
-    e->next_serial  = 0;
-    e->stream_owner = -1;
-    e->slots.reserve((size_t) pt->max_batch);
+    TtsEngine * e      = new TtsEngine();
+    e->pt              = pt;
+    e->tok             = tok;
+    e->next_serial     = 0;
+    const size_t maxM  = (size_t) pt->max_batch;
+    const size_t K     = (size_t) pt->num_code_groups;
+    const size_t maxT  = (size_t) (1 << (CODEC_STREAM_CLASSES - 1));
+    e->codec_M         = 0;
+    e->codec_target    = 1;
+    e->codec_pending_n = 0;
+    e->codec_pending.assign(maxT * maxM * K, 0);
+    e->codec_live.assign(maxM, 0);
+    e->codec_codes.assign(maxT * maxM * K, 0);
+    e->codec_audio.assign(maxM * maxT * (size_t) TOKENIZER_HOP_LENGTH, 0.0f);
+    e->codec_outs.assign(maxM, nullptr);
+    e->slots.reserve(maxM);
     return e;
 }
 
 void tts_engine_free(TtsEngine * e) {
-    if (!e) {
-        return;
-    }
-    for (TtsSlot & s : e->slots) {
-        pipeline_codec_snap_free(&s.snap);
-    }
     delete e;
 }
 
@@ -554,30 +577,134 @@ int tts_engine_active(const TtsEngine * e) {
     return (int) e->slots.size();
 }
 
-// Make `s` the owner of the live codec stream state: park the current
-// owner's state into its mirror, then restore this slot's. A slot with
-// no mirror yet keeps whatever is live (its admit resets the state
-// right after). With one streaming slot the ownership never moves and
-// no copy is paid.
-static bool tts_engine_codec_own(TtsEngine * e, TtsSlot * s) {
-    if (e->stream_owner == s->serial) {
-        return true;
+static TtsSlot * tts_engine_codec_lane_slot(TtsEngine * e, int m) {
+    for (TtsSlot & s : e->slots) {
+        if (s.codec_set == m) {
+            return &s;
+        }
     }
-    if (e->stream_owner >= 0) {
-        for (TtsSlot & o : e->slots) {
-            if (o.serial == e->stream_owner) {
-                if (!pipeline_codec_stream_save(&e->pt->codec, &o.snap)) {
-                    return false;
+    return nullptr;
+}
+
+// Drain the shared pending rows through greedy width classes: one
+// batched graph compute decodes all codec_M lanes per chunk, then each
+// lane's samples go to its slot's on_chunk. A cancelled slot or a lane
+// riding zero rows gets a NULL out and no callback. The full flush
+// wall time lands on every lane's codec_ms, the same convention as the
+// batched talker and predictor spans. Returns false only on a decode
+// failure; a callback cancel marks the slot and the flush carries on.
+static bool tts_engine_codec_flush(TtsEngine * e) {
+    PipelineTTS * pt  = e->pt;
+    const int     M   = e->codec_M;
+    const int     K   = pt->num_code_groups;
+    const int     hop = TOKENIZER_HOP_LENGTH;
+    Timer         t_codec;
+    while (e->codec_pending_n > 0) {
+        int T = 1 << (CODEC_STREAM_CLASSES - 1);
+        while (T > e->codec_pending_n) {
+            T >>= 1;
+        }
+        for (int m = 0; m < M; m++) {
+            for (int k = 0; k < K; k++) {
+                for (int t = 0; t < T; t++) {
+                    e->codec_codes[(size_t) (m * K + k) * (size_t) T + (size_t) t] =
+                        e->codec_pending[((size_t) t * (size_t) M + (size_t) m) * (size_t) K + (size_t) k];
                 }
-                break;
+            }
+        }
+        for (int m = 0; m < M; m++) {
+            TtsSlot *  s    = tts_engine_codec_lane_slot(e, m);
+            const bool want = s && e->codec_live[(size_t) m] && s->fin_status != QT_STATUS_CANCELLED &&
+                              s->job->params->on_chunk != NULL;
+            e->codec_outs[(size_t) m] =
+                want ? e->codec_audio.data() + (size_t) m * (size_t) (1 << (CODEC_STREAM_CLASSES - 1)) * (size_t) hop :
+                       nullptr;
+        }
+        if (!pipeline_codec_decode_stream_batch(&pt->codec, e->codec_codes.data(), T, M, e->codec_outs.data())) {
+            return false;
+        }
+        e->codec_pending_n -= T;
+        if (e->codec_pending_n > 0) {
+            std::memmove(e->codec_pending.data(), e->codec_pending.data() + (size_t) T * (size_t) M * (size_t) K,
+                         (size_t) e->codec_pending_n * (size_t) M * (size_t) K * sizeof(int32_t));
+        }
+        for (int m = 0; m < M; m++) {
+            if (!e->codec_outs[(size_t) m]) {
+                continue;
+            }
+            TtsSlot *                    s = tts_engine_codec_lane_slot(e, m);
+            const struct qt_tts_params * p = s->job->params;
+            if (!p->on_chunk(e->codec_outs[(size_t) m], T * hop, p->on_chunk_user_data)) {
+                qt_log(QT_LOG_INFO, "[Pipeline] on_chunk callback aborted the synthesis (lane %d)", m);
+                s->finished   = true;
+                s->fin_status = QT_STATUS_CANCELLED;
             }
         }
     }
-    e->stream_owner = -1;
-    if (s->snap.ctx && !pipeline_codec_stream_load(&e->pt->codec, &s->snap)) {
+    const double ms = t_codec.ms();
+    for (int m = 0; m < M; m++) {
+        TtsSlot * s = tts_engine_codec_lane_slot(e, m);
+        if (s) {
+            s->perf.codec_ms += ms;
+        }
+    }
+    return true;
+}
+
+// Attach a fresh streaming lane for an admitted slot: drain the
+// pending rows of the current lanes first (their chunks come out
+// shorter around the event), zero or ICL prime the new set, restart
+// the shared ramp at width 1 so the newcomer's first frame decodes
+// immediately. The ICL path restores a previously primed reference
+// snapshot device to device, or primes through the staging set in max
+// width chunks with the audio discarded and snapshots it for reuse.
+static bool tts_engine_codec_admit(TtsEngine * e, TtsSlot * s) {
+    PipelineTTS *   pt = e->pt;
+    PipelineCodec * pc = &pt->codec;
+    const int       K  = pt->num_code_groups;
+    if (e->codec_pending_n > 0 && !tts_engine_codec_flush(e)) {
         return false;
     }
-    e->stream_owner = s->serial;
+    const int set = e->codec_M;
+    if (s->ref_codes_ptr != NULL) {
+        Timer          t_seed;
+        const uint64_t key = pipeline_codec_ref_key(s->ref_codes_ptr, K, s->ref_codes_T);
+        if (!pipeline_codec_stream_restore(pc, key, set)) {
+            const int staging = pt->max_batch;
+            if (!pipeline_codec_stream_reset(pc, staging)) {
+                return false;
+            }
+            std::vector<int32_t> chunk((size_t) (1 << (CODEC_STREAM_CLASSES - 1)) * (size_t) K);
+            int                  t0 = 0;
+            while (t0 < s->ref_codes_T) {
+                int T = 1 << (CODEC_STREAM_CLASSES - 1);
+                while (T > s->ref_codes_T - t0) {
+                    T >>= 1;
+                }
+                for (int k = 0; k < K; k++) {
+                    for (int t = 0; t < T; t++) {
+                        chunk[(size_t) k * (size_t) T + (size_t) t] =
+                            s->ref_codes_ptr[(size_t) k * (size_t) s->ref_codes_T + (size_t) (t0 + t)];
+                    }
+                }
+                if (!pipeline_codec_decode_stream(pc, chunk.data(), T, NULL)) {
+                    return false;
+                }
+                t0 += T;
+            }
+            if (!pipeline_codec_stream_snapshot(pc, key, staging) ||
+                !pipeline_codec_stream_copy_set(pc, staging, set)) {
+                return false;
+            }
+        }
+        s->perf.codec_ms += t_seed.ms();
+    } else if (!pipeline_codec_stream_reset(pc, set)) {
+        return false;
+    }
+    s->codec_set       = set;
+    e->codec_M         = set + 1;
+    e->codec_target    = 1;
+    e->codec_pending_n = 0;
     return true;
 }
 
@@ -694,7 +821,7 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
     s.pending_c0       = -1;
     s.has_frame        = false;
     s.streaming        = (params->on_chunk != NULL);
-    s.snap             = {};
+    s.codec_set        = -1;
     s.finished         = false;
     s.fin_status       = QT_STATUS_OK;
     s.perf             = {};
@@ -780,33 +907,16 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
     s.all_codes.reserve((size_t) params->max_new_tokens);
     s.talker_history.reserve((size_t) params->max_new_tokens);
 
-    // Stateful streaming decoder: every generated frame decodes
-    // immediately through the persistent codec state and emits its
-    // samples, so the first audio callback fires with the first frame.
-    // ICL clone priming runs the full reference through the same state,
-    // matching the upstream reference plus generated decode exactly.
-    // Taking ownership parks the previous streaming slot's state first.
+    // Streaming lane attach: the shared codec ramp restarts at width 1
+    // so the first generated frame decodes immediately and the audio
+    // callback fires with it. ICL clone priming runs the full reference
+    // through the staging set, matching the upstream reference plus
+    // generated decode exactly.
     if (s.streaming) {
-        if (!tts_engine_codec_own(e, &s)) {
-            qt_set_error("pipeline_tts_synthesize: codec stream state park failed");
+        if (!tts_engine_codec_admit(e, &s)) {
+            qt_set_error("pipeline_tts_synthesize: codec stream lane admit failed");
             e->slots.pop_back();
             return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
-        }
-        if (!s.stream.init(&pt->codec, pt->num_code_groups)) {
-            qt_set_error("pipeline_tts_synthesize: codec stream state init failed");
-            e->stream_owner = -1;
-            e->slots.pop_back();
-            return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
-        }
-        if (s.ref_codes_ptr != NULL) {
-            Timer t_seed;
-            if (!s.stream.seed_reference(&pt->codec, s.ref_codes_ptr, s.ref_codes_T)) {
-                qt_set_error("pipeline_tts_synthesize: codec stream reference priming failed");
-                e->stream_owner = -1;
-                e->slots.pop_back();
-                return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
-            }
-            s.perf.codec_ms += t_seed.ms();
         }
     }
 
@@ -818,8 +928,10 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
     if (!talker_forward_prefill(&pt->talker, &pt->talker_kv, slot_idx, pt->sched, &pt->talker_arena, pt->hidden_bridge,
                                 s.prompt.input_embed.data(), s.prompt.T_ctx, pt->use_flash_attn, pt->clamp_fp16,
                                 params->dump_dir, &fw)) {
-        if (e->stream_owner == s.serial) {
-            e->stream_owner = -1;
+        // The lane just attached is the tail one; dropping it needs no
+        // compaction.
+        if (s.codec_set >= 0) {
+            e->codec_M--;
         }
         e->slots.pop_back();
         return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
@@ -860,30 +972,18 @@ static void tts_slot_complete(TtsEngine * e, TtsSlot & s) {
         }
 
         if (s.streaming) {
-            // Streaming tail: drain the sub chunk remainder of the
-            // ramp, then finish with an empty buffered output.
-            if (!tts_engine_codec_own(e, &s)) {
-                qt_set_error("pipeline_tts_synthesize: codec stream state park failed");
-                st = QT_STATUS_GENERATE_FAILED;
-            } else if (!s.stream.drain(&pt->codec, params->on_chunk, params->on_chunk_user_data)) {
-                if (s.stream.cancelled) {
-                    qt_log(QT_LOG_INFO, "[Pipeline] on_chunk callback aborted the synthesis");
-                    st = QT_STATUS_CANCELLED;
-                } else {
-                    qt_set_error("pipeline_tts_synthesize: streaming codec drain failed");
-                    qt_log(QT_LOG_ERROR, "[Pipeline] streaming codec drain failed");
-                    st = QT_STATUS_GENERATE_FAILED;
-                }
-            } else {
-                if (job->out) {
-                    job->out->samples     = NULL;
-                    job->out->n_samples   = 0;
-                    job->out->sample_rate = TOKENIZER_SAMPLE_RATE;
-                    job->out->channels    = 1;
-                }
-                s.perf.total_ms = s.t_total.ms();
-                tts_log_perf(s.perf);
+            // Streaming tail: the engine step drained the shared
+            // pending rows before entering retirement, so every sample
+            // is already dispatched; finish with an empty buffered
+            // output.
+            if (job->out) {
+                job->out->samples     = NULL;
+                job->out->n_samples   = 0;
+                job->out->sample_rate = TOKENIZER_SAMPLE_RATE;
+                job->out->channels    = 1;
             }
+            s.perf.total_ms = s.t_total.ms();
+            tts_log_perf(s.perf);
         } else if (s.all_codes.empty()) {
             // Buffered path: empty all_codes means EOS at step 0 with
             // no audio. Return success and an empty qt_audio struct;
@@ -957,11 +1057,6 @@ static void tts_slot_complete(TtsEngine * e, TtsSlot & s) {
             }
         }
     }
-
-    if (e->stream_owner == s.serial) {
-        e->stream_owner = -1;
-    }
-    pipeline_codec_snap_free(&s.snap);
 
     if (st != QT_STATUS_OK) {
         job->error = qt_last_error();
@@ -1169,27 +1264,10 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
                     s.all_codes.push_back(codes);
                     s.talker_history.push_back(s.pending_c0);
 
-                    if (s.streaming) {
-                        Timer t_codec;
-                        bool  pushed = tts_engine_codec_own(e, &s) &&
-                                      s.stream.push_frame(&pt->codec, codes.data(), p->on_chunk, p->on_chunk_user_data);
-                        s.perf.codec_ms += t_codec.ms();
-                        if (!pushed) {
-                            if (s.stream.cancelled) {
-                                qt_log(QT_LOG_INFO, "[Pipeline] on_chunk callback aborted the synthesis (slot %d)", i);
-                                s.finished   = true;
-                                s.fin_status = QT_STATUS_CANCELLED;
-                            } else {
-                                qt_set_error("pipeline_tts_synthesize: streaming codec decode failed at frame %d",
-                                             s.step);
-                                qt_log(QT_LOG_ERROR, "[Pipeline] streaming codec decode failed at frame %d (slot %d)",
-                                       s.step, i);
-                                s.finished   = true;
-                                s.fin_status = QT_STATUS_GENERATE_FAILED;
-                            }
-                            continue;
-                        }
-                    }
+                    // Streaming slots stage this frame through
+                    // all_codes.back() and has_frame; the shared codec
+                    // flush after this loop decodes every lane in one
+                    // batched compute.
 
                     // Next decode input: the 16 frame codes gather and sum
                     // in graph (codebook 0 from talker.codec_embedding, the
@@ -1251,16 +1329,91 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
     // finished nor advanced cannot exist: every live slot either emits
     // or finishes.
 
-    // 5) Retirement: swap-remove keeps the active range consecutive.
+    // 5) Shared codec streaming: one lockstep flush cadence over the
+    // lanes [0, codec_M). A membership change this frame (a streaming
+    // slot finished) first drains the aligned pending rows, then the
+    // freshly staged frames ride a single row flush where a lane whose
+    // slot emitted nothing carries a zero code row and a NULL out, so
+    // every retiring lane leaves with its audio fully dispatched before
+    // the swap remove below. Zero rows only ever exist in that single
+    // row flush, which keeps the per lane audio blocks free of padding.
+    if (e->codec_M > 0) {
+        const int num_cg     = pt->num_code_groups;
+        bool      any_finish = false;
+        bool      any_stage  = false;
+        for (TtsSlot & s : e->slots) {
+            if (s.codec_set < 0) {
+                continue;
+            }
+            any_finish = any_finish || s.finished;
+            any_stage  = any_stage || s.has_frame;
+        }
+        bool ok = true;
+        if (any_finish && e->codec_pending_n > 0) {
+            ok = tts_engine_codec_flush(e);
+        }
+        if (ok && any_stage) {
+            int32_t * row =
+                e->codec_pending.data() + (size_t) e->codec_pending_n * (size_t) e->codec_M * (size_t) num_cg;
+            for (int m = 0; m < e->codec_M; m++) {
+                TtsSlot * s = tts_engine_codec_lane_slot(e, m);
+                if (s && s->has_frame) {
+                    std::memcpy(row + (size_t) m * (size_t) num_cg, s->all_codes.back().data(),
+                                (size_t) num_cg * sizeof(int32_t));
+                    e->codec_live[(size_t) m] = 1;
+                } else {
+                    std::memset(row + (size_t) m * (size_t) num_cg, 0, (size_t) num_cg * sizeof(int32_t));
+                    e->codec_live[(size_t) m] = 0;
+                }
+            }
+            e->codec_pending_n++;
+            if (any_finish) {
+                ok = tts_engine_codec_flush(e);
+            } else if (e->codec_pending_n >= e->codec_target) {
+                ok = tts_engine_codec_flush(e);
+                if (ok && e->codec_target < (1 << (CODEC_STREAM_CLASSES - 1))) {
+                    e->codec_target <<= 1;
+                }
+            }
+        }
+        if (!ok) {
+            qt_set_error("pipeline_tts_synthesize: streaming codec decode failed");
+            qt_log(QT_LOG_ERROR, "[Pipeline] streaming codec decode failed");
+            for (TtsSlot & s : e->slots) {
+                if (s.codec_set >= 0) {
+                    s.finished   = true;
+                    s.fin_status = QT_STATUS_GENERATE_FAILED;
+                }
+            }
+        }
+    }
+
+    // 6) Retirement: swap-remove keeps the active range consecutive.
     // The tail slot's talker KV set copies device side into the freed
     // index; the bridge column and the predictor set rewrite next frame
-    // before any read, so only the talker cache moves.
+    // before any read, so only the talker cache moves. The codec lane
+    // span compacts the same way: the tail lane's stream state copies
+    // into the freed lane and its slot reindexes.
     for (int i = 0; i < (int) e->slots.size();) {
         if (!e->slots[(size_t) i].finished) {
             i++;
             continue;
         }
         tts_slot_complete(e, e->slots[(size_t) i]);
+        if (e->slots[(size_t) i].codec_set >= 0) {
+            TtsSlot & dead  = e->slots[(size_t) i];
+            const int freed = dead.codec_set;
+            const int tail  = e->codec_M - 1;
+            pipeline_codec_stream_copy_set(&pt->codec, tail, freed);
+            for (TtsSlot & o : e->slots) {
+                if (o.codec_set == tail) {
+                    o.codec_set = freed;
+                    break;
+                }
+            }
+            dead.codec_set = -1;
+            e->codec_M--;
+        }
         if (retired) {
             retired->push_back(e->slots[(size_t) i].job);
         }
