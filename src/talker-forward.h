@@ -238,10 +238,11 @@ static struct ggml_tensor * talker_layer_forward(struct ggml_context * ctx,
     struct ggml_tensor * h2 = ggml_rms_norm(ctx, x, eps);
     h2                      = ggml_mul(ctx, h2, layer.post_attn_norm_w);
 
+    // gate and up mul_mats adjacent to the GLU node: the CUDA backend
+    // fuses the three into one kernel (ggml_cuda_should_fuse_mul_mat).
     struct ggml_tensor * gate = ggml_mul_mat(ctx, layer.mlp.gate_proj_w, h2);
     struct ggml_tensor * up   = ggml_mul_mat(ctx, layer.mlp.up_proj_w, h2);
-    gate                      = ggml_silu(ctx, gate);
-    struct ggml_tensor * gu   = ggml_mul(ctx, gate, up);
+    struct ggml_tensor * gu   = ggml_swiglu_split(ctx, gate, up);
     struct ggml_tensor * mlp  = ggml_mul_mat(ctx, layer.mlp.down_proj_w, gu);
 
     x = ggml_add(ctx, x, mlp);
@@ -598,10 +599,11 @@ static struct ggml_tensor * talker_layer_forward_batch(struct ggml_context * ctx
     struct ggml_tensor * h2 = ggml_rms_norm(ctx, x, eps);
     h2                      = ggml_mul(ctx, h2, layer.post_attn_norm_w);
 
+    // gate and up mul_mats adjacent to the GLU node: the CUDA backend
+    // fuses the three into one kernel (ggml_cuda_should_fuse_mul_mat).
     struct ggml_tensor * gate = ggml_mul_mat(ctx, layer.mlp.gate_proj_w, h2);
     struct ggml_tensor * up   = ggml_mul_mat(ctx, layer.mlp.up_proj_w, h2);
-    gate                      = ggml_silu(ctx, gate);
-    struct ggml_tensor * gu   = ggml_mul(ctx, gate, up);
+    struct ggml_tensor * gu   = ggml_swiglu_split(ctx, gate, up);
     struct ggml_tensor * mlp  = ggml_mul_mat(ctx, layer.mlp.down_proj_w, gu);
 
     x = ggml_add(ctx, x, mlp);
