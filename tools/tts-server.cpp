@@ -52,7 +52,11 @@ static void print_usage(const char * prog) {
             "  --max-batch <n>         Concurrent requests batched on the GPU (default: 1)\n"
             "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
-            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds, wav responses (default: 24.0)\n",
+            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds, wav responses (default: 24.0)\n"
+            "  --max-prefill-tokens <n> Reserve the compute buffer for an n-token prefill at\n"
+            "                          startup instead of growing it on a live request; exits\n"
+            "                          with an error if the reservation does not fit instead of\n"
+            "                          failing later on live traffic (default: 0, disabled)\n",
             prog);
 }
 
@@ -69,12 +73,13 @@ int main(int argc, char ** argv) {
     std::string   model_alias;
     std::string   lang = "auto";
     server_config cfg;
-    bool          use_fa          = true;
-    bool          clamp_fp16      = false;
-    int           max_batch       = 1;
+    bool          use_fa             = true;
+    bool          clamp_fp16         = false;
+    int           max_batch          = 1;
     // Chunk sentinel : qt_init resolves a non positive value to the
     // library default.
-    float         codec_chunk_dur = 0.0f;
+    float         codec_chunk_dur    = 0.0f;
+    int           max_prefill_tokens = 0;
 
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
@@ -98,6 +103,8 @@ int main(int argc, char ** argv) {
             max_batch = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--codec-chunk-dur") && i + 1 < argc) {
             codec_chunk_dur = (float) std::atof(argv[++i]);
+        } else if (!std::strcmp(arg, "--max-prefill-tokens") && i + 1 < argc) {
+            max_prefill_tokens = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--help") || !std::strcmp(arg, "-h")) {
             print_usage(argv[0]);
             return 0;
@@ -115,12 +122,13 @@ int main(int argc, char ** argv) {
 
     struct qt_init_params iparams;
     qt_init_default_params(&iparams);
-    iparams.talker_path     = talker_path;
-    iparams.codec_path      = codec_path;
-    iparams.use_fa          = use_fa;
-    iparams.clamp_fp16      = clamp_fp16;
-    iparams.max_batch       = max_batch;
-    iparams.codec_chunk_sec = codec_chunk_dur;
+    iparams.talker_path        = talker_path;
+    iparams.codec_path         = codec_path;
+    iparams.use_fa             = use_fa;
+    iparams.clamp_fp16         = clamp_fp16;
+    iparams.max_batch          = max_batch;
+    iparams.codec_chunk_sec    = codec_chunk_dur;
+    iparams.max_prefill_tokens = max_prefill_tokens;
 
     struct qt_context * q = qt_init(&iparams);
     if (!q) {

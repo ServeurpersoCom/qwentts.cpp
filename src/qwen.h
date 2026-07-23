@@ -157,11 +157,28 @@ struct qt_init_params {
     // frames at 12.5 Hz). The streaming path frames its own chunks
     // through the persistent codec stream state and reads none of this.
     float codec_chunk_sec;
+
+    // ABI v4. Talker prefill graph shapes are bucketed to multiples of
+    // 256 KV positions (see talker_forward_core); ggml_backend_sched
+    // grows its compute buffer the first time it sees a new bucket and
+    // never shrinks it back, so VRAM use ratchets up the first time a
+    // long enough prompt arrives in production traffic. Setting this to
+    // a positive token count runs one throwaway prefill of that length
+    // at qt_init time (result discarded, KV set 0 reset immediately
+    // after), forcing that bucket's compute buffer to be reserved up
+    // front instead of on a live request. This is a capacity check, not
+    // a performance warmup: qt_init fails if the reservation does not
+    // fit, so a deployment that cannot afford its own configured worst
+    // case refuses to start instead of failing later on live traffic.
+    // 0 (zero init from older callers) disables the reservation,
+    // matching previous behavior. Values above the talker KV cache's
+    // max_seq_len are clamped down to it.
+    int max_prefill_tokens;
 };
 
 // Initialise to the standard defaults: both paths NULL (caller must set
 // them before calling qt_init), use_fa true, clamp_fp16 false,
-// max_batch 1, codec_chunk_sec 24.0.
+// max_batch 1, codec_chunk_sec 24.0, max_prefill_tokens 0 (disabled).
 QT_API void qt_init_default_params(struct qt_init_params * p);
 
 // Allocate every module described by params. Returns NULL on any

@@ -199,10 +199,16 @@ struct PipelineTTS {
 // invalid metadata. use_fa is gated on bp.has_gpu inside the load:
 // CPU only runs always use the manual F32 attention chain. clamp_fp16
 // is forwarded as is. max_batch sizes the KV sets, the bridge columns
-// and the maximum concurrent slots (minimum 1). codec_chunk_sec
 // converts to the chunk width every buffered decode on this handle
 // runs with; the left context that pairs with it derives from the
-// codec's own sliding window. Caller frees with pipeline_tts_free.
+// codec's own sliding window. max_prefill_tokens > 0 runs one
+// throwaway talker prefill of that length (clamped to the KV cache's
+// max_seq_len) before returning, forcing ggml_backend_sched to reserve
+// the compute buffer for that prefill bucket up front instead of
+// growing it on a live request; failure is fatal (returns false), by
+// design -- a deployment that can't afford its configured worst case
+// should refuse to start. 0 skips the reservation. Caller frees with
+// pipeline_tts_free.
 bool pipeline_tts_load(PipelineTTS * pt,
                        const char *  talker_gguf_path,
                        const char *  codec_gguf_path,
@@ -210,7 +216,8 @@ bool pipeline_tts_load(PipelineTTS * pt,
                        bool          use_fa,
                        bool          clamp_fp16,
                        int           max_batch,
-                       float         codec_chunk_sec);
+                       float         codec_chunk_sec,
+                       int           max_prefill_tokens);
 
 void pipeline_tts_free(PipelineTTS * pt);
 

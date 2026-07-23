@@ -224,7 +224,8 @@ void qt_init_default_params(struct qt_init_params * p) {
     p->clamp_fp16  = false;
     p->max_batch   = 1;
 
-    p->codec_chunk_sec = QT_CODEC_CHUNK_SEC_DEFAULT;
+    p->codec_chunk_sec    = QT_CODEC_CHUNK_SEC_DEFAULT;
+    p->max_prefill_tokens = 0;
 }
 
 void qt_tts_default_params(struct qt_tts_params * p) {
@@ -338,11 +339,14 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
 
     qt_log(QT_LOG_INFO, "[Qwen] qwentts.cpp %s", qt_version());
 
-    const int max_batch = params->max_batch > 1 ? params->max_batch : 1;
+    // ABI v3 tail field: zero init from older callers means 1.
+    const int max_batch = (params->abi_version >= 3 && params->max_batch > 1) ? params->max_batch : 1;
 
     // The chunk width resolves once here: it is a property of the
     // handle, read by every buffered decode it runs.
     const float chunk_sec = params->codec_chunk_sec > 0.0f ? params->codec_chunk_sec : QT_CODEC_CHUNK_SEC_DEFAULT;
+    // ABI v4 tail field: zero init from older callers means disabled.
+    const int max_prefill_tokens = params->abi_version >= 4 ? params->max_prefill_tokens : 0;
 
     // new qt_context() value-initialises every field: POD aggregates
     // (BackendPair, PipelineTTS) are zero-init, std containers in
@@ -362,7 +366,7 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
         }
 
         if (!pipeline_tts_load(&q->pt, params->talker_path, params->codec_path, q->bp, params->use_fa,
-                               params->clamp_fp16, max_batch, chunk_sec)) {
+                               params->clamp_fp16, max_batch, chunk_sec, max_prefill_tokens)) {
             qt_throw("qt_init: pipeline_tts_load failed for '%s' / '%s'", params->talker_path, params->codec_path);
         }
 
