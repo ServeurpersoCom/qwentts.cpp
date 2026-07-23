@@ -1,9 +1,9 @@
 # Docker
 
-Pre-built images: `ghcr.io/serveurpersocom/qwentts.cpp:cpu` and
-`ghcr.io/serveurpersocom/qwentts.cpp:cuda` (also tagged per release,
-e.g. `:cuda-v1.2.3`). Both run `tts-server`; `qwen-tts` and
-`qwen-codec` are included in the same image at `/app/`.
+Pre-built images: `ghcr.io/serveurpersocom/qwentts.cpp:cpu`,
+`:cuda` and `:vulkan` (also tagged per release, e.g. `:cuda-v1.2.3`).
+All three run `tts-server`; `qwen-tts` and `qwen-codec` are included in
+the same image at `/app/`.
 
 ```
 docker run --rm -p 8080:8080 \
@@ -24,6 +24,21 @@ docker run --rm --gpus all -p 8080:8080 \
     -e CODEC_PATH=/models/qwen-tokenizer-12hz-Q8_0.gguf \
     ghcr.io/serveurpersocom/qwentts.cpp:cuda
 ```
+
+Vulkan image (AMD/Intel GPUs), passing through the DRI device node:
+
+```
+docker run --rm --device /dev/dri -p 8080:8080 \
+    -v /path/to/models:/models:ro \
+    -e MODEL_PATH=/models/qwen-talker-1.7b-base-Q8_0.gguf \
+    -e CODEC_PATH=/models/qwen-tokenizer-12hz-Q8_0.gguf \
+    ghcr.io/serveurpersocom/qwentts.cpp:vulkan
+```
+
+The `:vulkan` image bundles Mesa's Vulkan drivers (AMD/Intel). On an
+NVIDIA GPU, prefer `:cuda`; running `:vulkan` there would additionally
+need the host's proprietary NVIDIA Vulkan ICD mounted in, which the
+image does not provide.
 
 ## Entrypoint environment variables
 
@@ -50,8 +65,9 @@ under its filename stem (e.g. `/voices/freeman.wav` -> voice
 ```
 git clone --recurse-submodules https://github.com/ServeurpersoCom/qwentts.cpp.git
 cd qwentts.cpp
-docker build --target cpu  -t qwentts.cpp:cpu  .
-docker build --target cuda -t qwentts.cpp:cuda .
+docker build --target cpu    -t qwentts.cpp:cpu    .
+docker build --target cuda   -t qwentts.cpp:cuda   .
+docker build --target vulkan -t qwentts.cpp:vulkan .
 ```
 
 `--target` is required to pick a variant; without it, `docker build`

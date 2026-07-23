@@ -5,8 +5,9 @@
 # `submodules: recursive` in CI) -- this Dockerfile does not fetch it.
 #
 # Usage:
-#   docker build --target cpu  -t qwentts.cpp:cpu  .
-#   docker build --target cuda -t qwentts.cpp:cuda .
+#   docker build --target cpu    -t qwentts.cpp:cpu    .
+#   docker build --target cuda   -t qwentts.cpp:cuda   .
+#   docker build --target vulkan -t qwentts.cpp:vulkan .
 #
 # Pascal (sm_61) and other GPUs older than this project's default
 # distributed arch list (Turing+) need an explicit override, since
@@ -73,6 +74,34 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     > /dev/null && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build-cuda /build/build/tts-server /build/build/qwen-tts /build/build/qwen-codec /build/build/*.so* ./
+COPY docker/entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh
+ENV LD_LIBRARY_PATH=/app
+ENTRYPOINT ["./entrypoint.sh"]
+
+# ------------------------------------------------------------- Vulkan build
+# AMD/Intel GPUs (and NVIDIA via its Vulkan ICD). glslc (shader compiler) is
+# only packaged by the LunarG SDK repo on Ubuntu 22.04, not apt's universe.
+FROM ubuntu:22.04 AS build-vulkan
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        git ca-certificates cmake g++ make wget gnupg \
+    > /dev/null && rm -rf /var/lib/apt/lists/*
+RUN wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | gpg --dearmor -o /usr/share/keyrings/lunarg.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan/1.3.296 jammy main" \
+        > /etc/apt/sources.list.d/lunarg-vulkan.list && \
+    apt-get update -qq && apt-get install -y -qq --no-install-recommends vulkan-sdk \
+    > /dev/null && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY . .
+RUN cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build --config Release -j"$(nproc)"
+
+FROM ubuntu:22.04 AS vulkan
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        libgomp1 libvulkan1 mesa-vulkan-drivers curl ca-certificates \
+    > /dev/null && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build-vulkan /build/build/tts-server /build/build/qwen-tts /build/build/qwen-codec /build/build/*.so* ./
 COPY docker/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 ENV LD_LIBRARY_PATH=/app
