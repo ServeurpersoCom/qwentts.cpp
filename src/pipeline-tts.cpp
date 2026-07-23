@@ -139,7 +139,8 @@ bool pipeline_tts_load(PipelineTTS * pt,
                        BackendPair   bp,
                        bool          use_fa,
                        bool          clamp_fp16,
-                       int           max_batch) {
+                       int           max_batch,
+                       int           max_prefill_tokens) {
     pt->bp                  = bp;
     pt->backend             = bp.backend;
     pt->sched               = NULL;
@@ -338,6 +339,60 @@ bool pipeline_tts_load(PipelineTTS * pt,
            pt->model_size.c_str(), pt->model_type.c_str(), pt->tokenizer_type.c_str(), pt->num_code_groups,
            pt->has_speaker_encoder ? "deferred" : "absent", pt->speakers.size(), pt->use_flash_attn ? "on" : "off",
            pt->clamp_fp16 ? "on" : "off", pt->max_batch);
+
+    // Reserve the compute buffer for the requested prefill bucket up
+    // front: a throwaway prefill on KV set 0 with a zero embedding
+    // (values do not matter, the result is discarded) touches the same
+    // graph shape a real request of that length would build, so
+    // ggml_backend_sched grows its buffer now instead of on live
+    // traffic. kv_cache_reset leaves set 0 clean for the first real
+    // request.
+    //
+    // Failure here (almost always CUDA OOM) is fatal, not a logged
+    // warning: the whole point of max_prefill_tokens is to make the
+    // deployment's configured worst case fail fast at startup, loud and
+    // visible, instead of succeeding here and then failing unpredictably
+    // mid conversation once a live request finally needs that memory.
+    if (max_prefill_tokens > 0) {
+        const int T = max_prefill_tokens < pt->talker_kv.max_seq_len ? max_prefill_tokens :
+                                                                        pt->talker_kv.max_seq_len;
+        qt_log(QT_LOG_INFO, "[Pipeline] Reserving talker prefill compute buffer for T=%d...", T);
+        std::vector<float>  dummy_embed((size_t) T * (size_t) pt->talker.hidden_size, 0.0f);
+        TalkerForwardOutput warmup_out;
+        if (!talker_forward_prefill(&pt->talker, &pt->talker_kv, 0, pt->sched, &pt->talker_arena, pt->hidden_bridge,
+                                    dummy_embed.data(), T, pt->use_flash_attn, pt->clamp_fp16, NULL, &warmup_out)) {
+            qt_log(QT_LOG_ERROR,
+                  "[Pipeline] FATAL: prefill reserve for T=%d failed (likely out of memory) -- this deployment "
+                  "cannot afford its configured worst case, refusing to start instead of failing later on live "
+                  "traffic",
+                  T);
+            for (size_t n = 0; n < pt->cp_graphs.size(); n++) {
+                code_predictor_graph_free(&pt->cp_graphs[n].prefill);
+                for (size_t g = 0; g < pt->cp_graphs[n].steps.size(); g++) {
+                    code_predictor_graph_free(&pt->cp_graphs[n].steps[g]);
+                }
+            }
+            pt->cp_graphs.clear();
+            pt->talker_decode_graphs.clear();
+            graph_arena_free(&pt->talker_arena);
+            ggml_backend_buffer_free(pt->bridge_buf);
+            pt->bridge_buf = NULL;
+            ggml_free(pt->bridge_ctx);
+            pt->bridge_ctx    = NULL;
+            pt->hidden_bridge = NULL;
+            kv_cache_free(&pt->code_predictor_kv);
+            kv_cache_free(&pt->talker_kv);
+            ggml_backend_sched_free(pt->sched);
+            pt->sched = NULL;
+            pipeline_codec_free(&pt->codec);
+            code_predictor_weights_free(&pt->code_predictor);
+            talker_weights_free(&pt->talker);
+            gf_close(&pt->gguf_talker);
+            return false;
+        }
+        kv_cache_reset(&pt->talker_kv, 0);
+    }
+
     return true;
 }
 

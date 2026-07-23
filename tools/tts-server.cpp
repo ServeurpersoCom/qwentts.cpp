@@ -51,7 +51,11 @@ static void print_usage(const char * prog) {
             "  --lang <name>           Language label (default: auto)\n"
             "  --max-batch <n>         Concurrent requests batched on the GPU (default: 1)\n"
             "  --no-fa                 Disable flash attention\n"
-            "  --clamp-fp16            Clamp hidden states to FP16 range\n",
+            "  --clamp-fp16            Clamp hidden states to FP16 range\n"
+            "  --max-prefill-tokens <n> Reserve the compute buffer for an n-token prefill at\n"
+            "                          startup instead of growing it on a live request; exits\n"
+            "                          with an error if the reservation does not fit instead of\n"
+            "                          failing later on live traffic (default: 0, disabled)\n",
             prog);
 }
 
@@ -70,7 +74,8 @@ int main(int argc, char ** argv) {
     server_config cfg;
     bool          use_fa     = true;
     bool          clamp_fp16 = false;
-    int           max_batch  = 1;
+    int           max_batch          = 1;
+    int           max_prefill_tokens = 0;
 
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
@@ -92,6 +97,8 @@ int main(int argc, char ** argv) {
             clamp_fp16 = true;
         } else if (!std::strcmp(arg, "--max-batch") && i + 1 < argc) {
             max_batch = std::atoi(argv[++i]);
+        } else if (!std::strcmp(arg, "--max-prefill-tokens") && i + 1 < argc) {
+            max_prefill_tokens = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--help") || !std::strcmp(arg, "-h")) {
             print_usage(argv[0]);
             return 0;
@@ -109,11 +116,12 @@ int main(int argc, char ** argv) {
 
     struct qt_init_params iparams;
     qt_init_default_params(&iparams);
-    iparams.talker_path = talker_path;
-    iparams.codec_path  = codec_path;
-    iparams.use_fa      = use_fa;
-    iparams.clamp_fp16  = clamp_fp16;
-    iparams.max_batch   = max_batch;
+    iparams.talker_path        = talker_path;
+    iparams.codec_path         = codec_path;
+    iparams.use_fa             = use_fa;
+    iparams.clamp_fp16         = clamp_fp16;
+    iparams.max_batch          = max_batch;
+    iparams.max_prefill_tokens = max_prefill_tokens;
 
     struct qt_context * q = qt_init(&iparams);
     if (!q) {
