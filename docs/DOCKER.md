@@ -73,21 +73,21 @@ docker build --target vulkan -t qwentts.cpp:vulkan .
 `--target` is required to pick a variant; without it, `docker build`
 uses the last stage in the `Dockerfile` (`cuda`).
 
-### Older GPUs (Pascal / sm_61 and similar)
+### Older GPUs (pre-Pascal)
 
 `docker build` never has GPU device access (unlike `docker run
 --gpus`), so CMake's CUDA-architecture autodetection has nothing to
 detect against. This project's own `CMakeLists.txt` already handles
-that by defaulting `CMAKE_CUDA_ARCHITECTURES` to a fixed Turing-and-newer
-list (`75-virtual;80-virtual;86-real;89-real`, plus Blackwell with CUDA
-12.8+) when the variable isn't set — which is exactly right for
-distributing a single image across modern GPUs, but does not cover
-Pascal (sm_61) or older. Building for one of those requires passing the
-architecture explicitly:
+that by defaulting `CMAKE_CUDA_ARCHITECTURES` to a fixed Pascal-and-newer
+list (`61-real;75-virtual;80-virtual;86-real;89-real`, plus Blackwell
+with CUDA 12.8+) when the variable isn't set, so Pascal cards (sm_61,
+e.g. the GTX 10-series) work out of the box with no override. GPUs
+older than Pascal (Maxwell and earlier) still need the architecture
+passed explicitly:
 
 ```
 docker build --target cuda -t qwentts.cpp:cuda \
-    --build-arg CMAKE_CUDA_ARCHITECTURES=61 .
+    --build-arg CMAKE_CUDA_ARCHITECTURES=50 .   # Maxwell
 ```
 
 Find your GPU's compute capability at

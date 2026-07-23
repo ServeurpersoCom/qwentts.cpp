@@ -9,11 +9,11 @@
 #   docker build --target cuda   -t qwentts.cpp:cuda   .
 #   docker build --target vulkan -t qwentts.cpp:vulkan .
 #
-# Pascal (sm_61) and other GPUs older than this project's default
-# distributed arch list (Turing+) need an explicit override, since
+# This project's default distributed arch list covers Pascal (sm_61) to
+# Blackwell. GPUs older than that need an explicit override, since
 # `docker build` has no GPU device to auto-detect against:
 #   docker build --target cuda -t qwentts.cpp:cuda \
-#       --build-arg CMAKE_CUDA_ARCHITECTURES=61 .
+#       --build-arg CMAKE_CUDA_ARCHITECTURES=50 .   # Maxwell
 # See docs/DOCKER.md for details.
 
 ARG CUDA_BUILD_IMAGE=nvidia/cuda:12.4.1-devel-ubuntu22.04
@@ -53,8 +53,8 @@ COPY . .
 # `docker build` never has GPU device access, unlike `docker run --gpus`, so:
 #  - CMAKE_CUDA_ARCHITECTURES must be set explicitly when targeting a GPU
 #    generation outside this project's own default arch list (see
-#    docs/DOCKER.md for the Pascal/sm_61 example); when unset here, CMake's
-#    own project default (Turing and newer) is used unchanged.
+#    docs/DOCKER.md); when unset here, CMake's own project default
+#    (Pascal and newer) is used unchanged.
 #  - ggml's CUDA VMM pool allocator needs driver-API symbols (cuMemCreate,
 #    cuMemMap, ...) at link time. The real libcuda.so isn't present without
 #    a GPU, but the devel image ships a link-time-only stub at
