@@ -1,0 +1,7 @@
+.git
+build
+checkpoints
+models
+docs
+examples
+*.md

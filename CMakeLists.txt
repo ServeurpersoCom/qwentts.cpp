@@ -46,14 +46,17 @@ if(NOT MSVC AND NOT GGML_SYCL)
     add_compile_definitions(_FORTIFY_SOURCE=2)
 endif()
 
-# CUDA architectures: cover Turing to Blackwell for distributed binaries.
+# CUDA architectures: cover Pascal to Blackwell for distributed binaries.
+# Pascal (61-real) is SASS-only, no virtual/PTX entry: it's the oldest
+# supported card and doesn't need to seed forward JIT compat for anything
+# older, unlike the 75-virtual baseline which does that for 7.5+.
 # Users can override with -DCMAKE_CUDA_ARCHITECTURES=native for local builds.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     find_package(CUDAToolkit QUIET)
     if(CUDAToolkit_FOUND AND CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
-        set(CMAKE_CUDA_ARCHITECTURES "75-virtual;80-virtual;86-real;89-real;120a-real;121a-real")
+        set(CMAKE_CUDA_ARCHITECTURES "61-real;75-virtual;80-virtual;86-real;89-real;120a-real;121a-real")
     else()
-        set(CMAKE_CUDA_ARCHITECTURES "75-virtual;80-virtual;86-real;89-real")
+        set(CMAKE_CUDA_ARCHITECTURES "61-real;75-virtual;80-virtual;86-real;89-real")
     endif()
 endif()
 
