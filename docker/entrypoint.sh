@@ -66,4 +66,33 @@ for wav in /voices/*.wav; do
     rm -f /tmp/voice_payload.json "$b64_file"
 done
 
+# Optional fatal worst-case warmup: exercises one real end-to-end synthesis
+# capped at WARMUP_MAX_NEW_TOKENS frames, so the decode and codec-decode
+# compute buffers (the part that scales with output AUDIO length) get
+# reserved up front -- complementing --max-prefill-tokens above, which
+# only reserves for input TEXT length. Off by default: only runs when
+# WARMUP_VOICE names an already-registered voice. Failure is fatal (kills
+# the server and exits non-zero) by design: a deployment that can't
+# afford its own configured worst case should refuse to come up healthy,
+# not fail unpredictably on a live request later. The exact wording of
+# WARMUP_TEXT doesn't matter -- only that it's long enough the model
+# doesn't hit EOS on its own before WARMUP_MAX_NEW_TOKENS does, so the
+# warmup actually exercises the same truncation path a real over-length
+# response would hit in production.
+if [ -n "$WARMUP_VOICE" ]; then
+    WARMUP_MAX_NEW_TOKENS=${WARMUP_MAX_NEW_TOKENS:-750}
+    WARMUP_TEXT=${WARMUP_TEXT:-"This is a warmup sentence used to reserve worst case memory usage before accepting real requests. This is a warmup sentence used to reserve worst case memory usage before accepting real requests. This is a warmup sentence used to reserve worst case memory usage before accepting real requests."}
+    echo "Warming up with a ${WARMUP_MAX_NEW_TOKENS}-frame-capped synthesis to reserve worst-case VRAM..."
+    if ! curl -sf -X POST "http://localhost:${PORT}/v1/audio/speech" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n --arg voice "$WARMUP_VOICE" --arg input "$WARMUP_TEXT" --argjson max_new_tokens "$WARMUP_MAX_NEW_TOKENS" \
+            '{voice: $voice, input: $input, response_format: "pcm", max_new_tokens: $max_new_tokens}')" \
+        -o /dev/null; then
+        echo " -> FATAL: worst-case warmup synthesis failed (likely out of VRAM) -- refusing to come up healthy"
+        kill "$SERVER_PID" 2>/dev/null
+        exit 1
+    fi
+    echo " -> ok"
+fi
+
 wait "$SERVER_PID"

@@ -56,6 +56,9 @@ image does not provide.
 | `MAX_PREFILL_TOKENS` | unset (server default: `0`, disabled)      |
 | `NO_FA`            | unset; set to `1` to disable flash attention  |
 | `CLAMP_FP16`       | unset; set to `1` to clamp hidden states      |
+| `WARMUP_VOICE`     | unset; set to a registered voice name to enable the startup warmup below |
+| `WARMUP_MAX_NEW_TOKENS` | `750` (only used when `WARMUP_VOICE` is set) |
+| `WARMUP_TEXT`      | a generic filler sentence (only used when `WARMUP_VOICE` is set) |
 
 Every `*.wav` placed in `/voices` is registered as a cloned voice
 under its filename stem (e.g. `/voices/freeman.wav` -> voice
@@ -64,6 +67,21 @@ under its filename stem (e.g. `/voices/freeman.wav` -> voice
 transcript of the reference clip -- which enables higher-fidelity ICL
 clone mode instead of the x_vector_only fallback used when no
 transcript is given.
+
+### Worst-case VRAM warmup
+
+`ggml_backend_sched` grows its compute buffer to fit the largest graph
+it has ever built and never shrinks it back, so VRAM use can ratchet
+up the first time a long prompt or a long reply arrives on live
+traffic. Setting `WARMUP_VOICE` runs one real synthesis at container
+startup, capped at `WARMUP_MAX_NEW_TOKENS` frames, to force that
+worst-case buffer growth to happen up front instead of on a live
+request. Combine with `--max-prefill-tokens` (`MAX_PREFILL_TOKENS`
+above) for the input side of the same problem. If the warmup
+synthesis fails (most likely out of VRAM), the container exits
+non-zero rather than come up healthy and fail unpredictably later --
+by design, since a deployment that can't afford its own configured
+worst case should know that at startup.
 
 ## Building locally
 
