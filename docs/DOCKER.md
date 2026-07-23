@@ -1,0 +1,87 @@
+# Docker
+
+Pre-built images: `ghcr.io/serveurpersocom/qwentts.cpp:cpu` and
+`ghcr.io/serveurpersocom/qwentts.cpp:cuda` (also tagged per release,
+e.g. `:cuda-v1.2.3`). Both run `tts-server`; `qwen-tts` and
+`qwen-codec` are included in the same image at `/app/`.
+
+```
+docker run --rm -p 8080:8080 \
+    -v /path/to/models:/models:ro \
+    -e MODEL_PATH=/models/qwen-talker-1.7b-base-Q8_0.gguf \
+    -e CODEC_PATH=/models/qwen-tokenizer-12hz-Q8_0.gguf \
+    ghcr.io/serveurpersocom/qwentts.cpp:cpu
+```
+
+CUDA image, with GPU access and a directory of reference WAVs to
+auto-register as cloned voices on startup:
+
+```
+docker run --rm --gpus all -p 8080:8080 \
+    -v /path/to/models:/models:ro \
+    -v /path/to/voices:/voices:ro \
+    -e MODEL_PATH=/models/qwen-talker-1.7b-base-Q8_0.gguf \
+    -e CODEC_PATH=/models/qwen-tokenizer-12hz-Q8_0.gguf \
+    ghcr.io/serveurpersocom/qwentts.cpp:cuda
+```
+
+## Entrypoint environment variables
+
+| Variable          | Default                                    |
+|--------------------|---------------------------------------------|
+| `MODEL_PATH`       | `/models/qwen-talker-1.7b-base-Q8_0.gguf`    |
+| `CODEC_PATH`       | `/models/qwen-tokenizer-12hz-Q8_0.gguf`      |
+| `TTS_LANG`         | `auto`                                       |
+| `HOST`             | `0.0.0.0`                                    |
+| `PORT`             | `8080`                                       |
+| `MODEL_ALIAS`      | unset (reports the GGUF file name)           |
+| `CODEC_CHUNK_DUR`  | unset (server default: `24.0`)               |
+| `CODEC_LEFT_DUR`   | unset (server default: `2.0`)                 |
+| `MAX_BATCH`        | unset (server default: `1`)                  |
+| `NO_FA`            | unset; set to `1` to disable flash attention  |
+| `CLAMP_FP16`       | unset; set to `1` to clamp hidden states      |
+
+Every `*.wav` placed in `/voices` is registered as a cloned voice
+under its filename stem (e.g. `/voices/freeman.wav` -> voice
+`freeman`) once `/health` responds.
+
+## Building locally
+
+```
+git clone --recurse-submodules https://github.com/ServeurpersoCom/qwentts.cpp.git
+cd qwentts.cpp
+docker build --target cpu  -t qwentts.cpp:cpu  .
+docker build --target cuda -t qwentts.cpp:cuda .
+```
+
+`--target` is required to pick a variant; without it, `docker build`
+uses the last stage in the `Dockerfile` (`cuda`).
+
+### Older GPUs (Pascal / sm_61 and similar)
+
+`docker build` never has GPU device access (unlike `docker run
+--gpus`), so CMake's CUDA-architecture autodetection has nothing to
+detect against. This project's own `CMakeLists.txt` already handles
+that by defaulting `CMAKE_CUDA_ARCHITECTURES` to a fixed Turing-and-newer
+list (`75-virtual;80-virtual;86-real;89-real`, plus Blackwell with CUDA
+12.8+) when the variable isn't set — which is exactly right for
+distributing a single image across modern GPUs, but does not cover
+Pascal (sm_61) or older. Building for one of those requires passing the
+architecture explicitly:
+
+```
+docker build --target cuda -t qwentts.cpp:cuda \
+    --build-arg CMAKE_CUDA_ARCHITECTURES=61 .
+```
+
+Find your GPU's compute capability at
+https://developer.nvidia.com/cuda-gpus.
+
+### CUDA driver stub at link time
+
+The CUDA build links against `libcuda.so` (the driver API, used by
+ggml's VMM pool allocator) at build time even though no driver is
+present. The `Dockerfile` already points the linker at the devel
+image's `lib64/stubs/libcuda.so` for this; it's mentioned here only in
+case you customize `CUDA_BUILD_IMAGE` to a base that ships that stub
+somewhere else.

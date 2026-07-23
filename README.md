@@ -39,6 +39,9 @@ cd qwentts.cpp
 NVCC_CCBIN=g++-13 ./buildcuda.sh # rolling release distros (Arch w/ GCC 16, etc.)
 ```
 
+Docker images (CPU and CUDA, built and published on every release) are
+also available: see [docs/DOCKER.md](docs/DOCKER.md).
+
 ## Model conversion
 
 Pre-converted GGUFs are available on Hugging Face :
