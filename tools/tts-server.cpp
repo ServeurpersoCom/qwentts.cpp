@@ -51,7 +51,9 @@ static void print_usage(const char * prog) {
             "  --lang <name>           Language label (default: auto)\n"
             "  --max-batch <n>         Concurrent requests batched on the GPU (default: 1)\n"
             "  --no-fa                 Disable flash attention\n"
-            "  --clamp-fp16            Clamp hidden states to FP16 range\n",
+            "  --clamp-fp16            Clamp hidden states to FP16 range\n"
+            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 24.0)\n"
+            "  --codec-left-dur <f>    Codec decode left context duration in seconds (default: 2.0)\n",
             prog);
 }
 
@@ -71,6 +73,8 @@ int main(int argc, char ** argv) {
     bool          use_fa     = true;
     bool          clamp_fp16 = false;
     int           max_batch  = 1;
+    float         codec_chunk_dur = 24.0f;
+    float         codec_left_dur  = 2.0f;
 
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
@@ -92,6 +96,10 @@ int main(int argc, char ** argv) {
             clamp_fp16 = true;
         } else if (!std::strcmp(arg, "--max-batch") && i + 1 < argc) {
             max_batch = std::atoi(argv[++i]);
+        } else if (!std::strcmp(arg, "--codec-chunk-dur") && i + 1 < argc) {
+            codec_chunk_dur = (float) std::atof(argv[++i]);
+        } else if (!std::strcmp(arg, "--codec-left-dur") && i + 1 < argc) {
+            codec_left_dur = (float) std::atof(argv[++i]);
         } else if (!std::strcmp(arg, "--help") || !std::strcmp(arg, "-h")) {
             print_usage(argv[0]);
             return 0;
@@ -212,11 +220,13 @@ int main(int argc, char ** argv) {
     // the same name and injects the pre-extracted reference latents. A
     // name matching neither is rejected instead of silently generating
     // voiceless.
-    be.synthesize = [q, &lang](const tts_request & req, const tts_sink & sink, std::string & err) -> int {
+    be.synthesize = [q, &lang, codec_chunk_dur, codec_left_dur](const tts_request & req, const tts_sink & sink, std::string & err) -> int {
         struct qt_tts_params p;
         qt_tts_default_params(&p);
         p.text = req.input.c_str();
         p.lang = lang.c_str();
+        p.codec_chunk_sec        = codec_chunk_dur;
+        p.codec_left_context_sec = codec_left_dur;
 
         // Copy the registered voice latents out under the lock: the
         // synthesis may run for seconds while another connection
