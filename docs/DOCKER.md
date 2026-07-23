@@ -53,12 +53,17 @@ image does not provide.
 | `CODEC_CHUNK_DUR`  | unset (server default: `24.0`)               |
 | `CODEC_LEFT_DUR`   | unset (server default: `2.0`)                 |
 | `MAX_BATCH`        | unset (server default: `1`)                  |
+| `MAX_PREFILL_TOKENS` | unset (server default: `0`, disabled)      |
 | `NO_FA`            | unset; set to `1` to disable flash attention  |
 | `CLAMP_FP16`       | unset; set to `1` to clamp hidden states      |
 
 Every `*.wav` placed in `/voices` is registered as a cloned voice
 under its filename stem (e.g. `/voices/freeman.wav` -> voice
-`freeman`) once `/health` responds.
+`freeman`) once `/health` responds. A same-stem `.txt` file (e.g.
+`/voices/freeman.txt`) supplies that voice's `ref_text` -- the
+transcript of the reference clip -- which enables higher-fidelity ICL
+clone mode instead of the x_vector_only fallback used when no
+transcript is given.
 
 ## Building locally
 

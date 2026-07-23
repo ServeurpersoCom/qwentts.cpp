@@ -31,7 +31,7 @@ RUN cmake -B build -DGGML_BLAS=ON -DCMAKE_BUILD_TYPE=Release && \
 
 FROM ubuntu:22.04 AS cpu
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-        libgomp1 libopenblas0 curl ca-certificates \
+        libgomp1 libopenblas0 curl ca-certificates jq \
     > /dev/null && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build-cpu /build/build/tts-server /build/build/qwen-tts /build/build/qwen-codec /build/build/*.so* ./
@@ -70,7 +70,7 @@ RUN cmake -B build -DGGML_CUDA=ON \
 
 FROM ${CUDA_RUNTIME_IMAGE} AS cuda
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-        libgomp1 curl ca-certificates \
+        libgomp1 curl ca-certificates jq \
     > /dev/null && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build-cuda /build/build/tts-server /build/build/qwen-tts /build/build/qwen-codec /build/build/*.so* ./
@@ -98,7 +98,7 @@ RUN cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release && \
 
 FROM ubuntu:22.04 AS vulkan
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-        libgomp1 libvulkan1 mesa-vulkan-drivers curl ca-certificates \
+        libgomp1 libvulkan1 mesa-vulkan-drivers curl ca-certificates jq \
     > /dev/null && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build-vulkan /build/build/tts-server /build/build/qwen-tts /build/build/qwen-codec /build/build/*.so* ./
