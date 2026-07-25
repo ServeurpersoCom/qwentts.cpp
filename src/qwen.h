@@ -130,9 +130,8 @@ struct qt_init_params {
     bool         use_fa;
     bool         clamp_fp16;
 
-    // ABI v3. Maximum number of concurrent synthesis requests batched
-    // on the GPU. 0 and 1 select the single sequence behavior (zero
-    // init from older callers keeps the previous semantics); values
+    // Maximum number of concurrent synthesis requests batched
+    // on the GPU. 0 and 1 select the single sequence behavior; values
     // above 1 size the KV cache sets accordingly and start an internal
     // worker thread that coalesces concurrent qt_synthesize calls into
     // batched decode steps, queueing FIFO beyond max_batch. With
@@ -143,7 +142,7 @@ struct qt_init_params {
     // and thread safe in both modes.
     int max_batch;
 
-    // ABI v4. Chunk width of the buffered codec decode, in seconds of
+    // Chunk width of the buffered codec decode, in seconds of
     // audio, resolved to an integer frame count at the codec frame rate
     // by qt_init and applied to every synthesis on the handle. A chunk
     // shorter than the utterance bounds the peak decode memory; the
@@ -337,7 +336,7 @@ struct qt_tts_params {
     qt_audio_chunk_cb on_chunk;
     void *            on_chunk_user_data;
 
-    // ABI v2. Pre-encoded voice reference, the latent counterpart of
+    // Pre-encoded voice reference, the latent counterpart of
     // ref_audio_24k. ref_spk_emb is the speaker embedding produced by
     // the speaker encoder (ref_spk_dim f32 values, must equal the
     // talker hidden size). ref_codes is the ICL code matrix produced
