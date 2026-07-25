@@ -70,9 +70,9 @@ int main(int argc, char ** argv) {
     std::string   model_alias;
     std::string   lang = "auto";
     server_config cfg;
-    bool          use_fa     = true;
-    bool          clamp_fp16 = false;
-    int           max_batch  = 1;
+    bool          use_fa          = true;
+    bool          clamp_fp16      = false;
+    int           max_batch       = 1;
     float         codec_chunk_dur = 24.0f;
     float         codec_left_dur  = 2.0f;
 
@@ -220,11 +220,12 @@ int main(int argc, char ** argv) {
     // the same name and injects the pre-extracted reference latents. A
     // name matching neither is rejected instead of silently generating
     // voiceless.
-    be.synthesize = [q, &lang, codec_chunk_dur, codec_left_dur](const tts_request & req, const tts_sink & sink, std::string & err) -> int {
+    be.synthesize = [q, &lang, codec_chunk_dur, codec_left_dur](const tts_request & req, const tts_sink & sink,
+                                                                std::string & err) -> int {
         struct qt_tts_params p;
         qt_tts_default_params(&p);
-        p.text = req.input.c_str();
-        p.lang = lang.c_str();
+        p.text                   = req.input.c_str();
+        p.lang                   = lang.c_str();
         p.codec_chunk_sec        = codec_chunk_dur;
         p.codec_left_context_sec = codec_left_dur;
 
