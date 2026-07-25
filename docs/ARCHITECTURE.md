@@ -322,12 +322,22 @@ share one layout.
 A standalone codec decode of an isolated window shows edge artefacts at
 the chunk boundary, because the causal conv kernels and the sliding
 window attention have no left context. `codec_chunked_decode` prepends
-`codec_left_context_sec` worth of previously decoded frames, decodes,
-then strips the samples that belong to the left context. Defaults match
-the upstream tokenizer : `codec_chunk_sec` 24.0 (300 frames at 12.5 Hz)
-and `codec_left_context_sec` 2.0 (25 frames). The first chunk collapses
-its left context to whatever is available. This routine serves the
-buffered one-shot decode only.
+`left_ctx_frames` worth of previously decoded frames, decodes, then
+strips the samples that belong to the left context. The chunk width
+comes from `qt_init_params.codec_chunk_sec` (default 24.0, 300 frames at
+12.5 Hz) and resolves to a frame count once at `qt_init`. The left
+context is not a caller knob : it derives from the decoder's own sliding
+window, 2 x sliding_window (144 frames on this codec), which is where
+the chunk output reaches the residual floor of the split. A shorter context leaves the decode
+audibly off, a longer one redecodes frames for nothing. The first chunk
+collapses its left context to whatever is available. This routine serves
+the buffered one-shot decode only.
+
+A chunk covering the whole utterance decodes in a single pass and is
+bit exact against `pipeline_codec_decode`. Any split leaves a residual
+around -50 dB that no amount of left context removes, growing slowly
+with the pass count, so the chunk is a memory knob and not a quality
+one.
 
 ### Streaming decode (stateful path)
 
@@ -490,14 +500,15 @@ QT_STATUS_CANCELLED       -5
 decode step, ~83 ms granularity) and `on_chunk`. With `on_chunk` set,
 synthesis runs in streaming mode : every generated frame emits its
 1920 samples immediately through the stateful codec and `out` stays
-empty on success. `codec_chunk_sec` / `codec_left_context_sec` drive
-the chunk framing of the buffered path only; the streaming path
-ignores both.
+empty on success. `qt_init_params.codec_chunk_sec` drives the chunk framing of the
+buffered path only; the streaming path ignores it.
 
-`QT_ABI_VERSION` guards struct growth : callers set `abi_version` (or
-let the default-params helpers do it) and the lib rejects a struct laid
-out for a newer header. `qt_version()` returns the git short hash and
-commit date.
+`QT_ABI_VERSION` and `QT_ABI_MIN_VERSION` bound the struct layouts this
+build addresses : callers set `abi_version` (or let the default-params
+helpers do it) and the lib rejects anything outside that closed range,
+a struct laid out for a newer header as well as one whose fields sit at
+offsets this build no longer maps. `qt_version()` returns the git short
+hash and commit date.
 
 ### Low-level API : src/pipeline-tts.h, src/pipeline-codec.h
 
@@ -554,7 +565,6 @@ Optional:
   --ref-text <path>       Transcript file for the reference (enables ICL clone mode)
   --max-new <n>           Max new audio frames (default: 2048)
   --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 24.0)
-  --codec-left-dur <f>    Codec decode left context duration in seconds (default: 2.0)
   --stream-by-line        Flush synthesis at each newline, one WAV header per line (-o '-')
 
 Sampling:

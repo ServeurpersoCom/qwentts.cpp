@@ -139,7 +139,8 @@ bool pipeline_tts_load(PipelineTTS * pt,
                        BackendPair   bp,
                        bool          use_fa,
                        bool          clamp_fp16,
-                       int           max_batch) {
+                       int           max_batch,
+                       float         codec_chunk_sec) {
     pt->bp                  = bp;
     pt->backend             = bp.backend;
     pt->sched               = NULL;
@@ -148,6 +149,10 @@ bool pipeline_tts_load(PipelineTTS * pt,
     pt->bridge_buf          = NULL;
     pt->hidden_bridge       = NULL;
     pt->max_batch           = max_batch > 1 ? max_batch : 1;
+
+    // Chunk width of the buffered decode. The conversion is a fixed
+    // 12.5 Hz ratio, so it lands here once instead of per synthesis.
+    pt->codec_chunk_frames = pipeline_tts_duration_sec_to_tokens(pt, codec_chunk_sec);
 
     // Fused flash attention needs a GPU kernel; CPU only backends fall
     // back to the F32 manual chain automatically. clamp_fp16 is forwarded
@@ -208,6 +213,13 @@ bool pipeline_tts_load(PipelineTTS * pt,
     // reference priming; must land before the first stream call, which
     // allocates the [t, c, S] state tensors from it.
     pt->codec.stream_sets = pt->max_batch + 1;
+
+    // Left context of the buffered chunked decode. Two decoder windows
+    // warm the transformer attention and the causal conv stack deep
+    // enough for the chunk output to sit at the residual floor of the
+    // split; a shorter context leaves the decode audibly off, a longer
+    // one buys nothing and redecodes frames for nothing.
+    pt->codec_left_ctx_frames = 2 * pt->codec.transformer.sliding_window;
 
     // Scheduler shared by talker_forward_* and code_predictor_step.
     // Routes ops the GPU backend cannot run (typical case: K-quant
@@ -729,13 +741,10 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
     const std::string speaker  = params->speaker ? params->speaker : "";
     const std::string ref_text = params->ref_text ? params->ref_text : "";
 
-    // ABI v2 latent reference fields. Callers compiled against ABI 1
-    // never set them; the abi_version gate keeps their uninitialised
-    // tail bytes out of the read path.
-    const float *   lat_spk_emb = (params->abi_version >= 2) ? params->ref_spk_emb : NULL;
-    const int       lat_spk_dim = (params->abi_version >= 2) ? params->ref_spk_dim : 0;
-    const int32_t * lat_codes   = (params->abi_version >= 2) ? params->ref_codes : NULL;
-    const int       lat_T       = (params->abi_version >= 2) ? params->ref_T : 0;
+    const float *   lat_spk_emb = params->ref_spk_emb;
+    const int       lat_spk_dim = params->ref_spk_dim;
+    const int32_t * lat_codes   = params->ref_codes;
+    const int       lat_T       = params->ref_T;
 
     const bool has_ref_audio = (params->ref_audio_24k != NULL) && (params->ref_n_samples > 0);
     const bool has_lat_spk   = (lat_spk_emb != NULL) && (lat_spk_dim > 0);
@@ -1005,13 +1014,11 @@ static void tts_slot_complete(TtsEngine * e, TtsSlot & s) {
             // reference codes prepends the buffer so the onset is voiced with
             // the reference's causal state, mirroring the upstream pipeline
             // which decodes reference plus generated then trims; the seeded
-            // samples strip from the front afterwards. Raising
-            // codec_left_context_sec past the reference duration reproduces the
-            // upstream full reference decode exactly.
-            const float chunk_sec    = params->codec_chunk_sec > 0.0f ? params->codec_chunk_sec : 24.0f;
-            const float left_ctx_sec = params->codec_left_context_sec >= 0.0f ? params->codec_left_context_sec : 2.0f;
-            const int   chunk_frames = pipeline_tts_duration_sec_to_tokens(pt, chunk_sec);
-            const int   left_ctx_frames = pipeline_tts_duration_sec_to_tokens(pt, left_ctx_sec);
+            // samples strip from the front afterwards. The seed caps at the
+            // derived left context, so a reference longer than that window
+            // contributes only its tail.
+            const int chunk_frames    = pt->codec_chunk_frames;
+            const int left_ctx_frames = pt->codec_left_ctx_frames;
 
             const int T_frames = (int) s.all_codes.size();
             int       seed     = 0;

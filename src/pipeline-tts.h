@@ -120,6 +120,13 @@ struct PipelineTTS {
     // single sequence layout and behavior.
     int max_batch;
 
+    // Codec decode framing of the buffered path, in 12.5 Hz frames.
+    // chunk sizes the decode window and comes from the caller; left_ctx
+    // is the warmup the decoder needs and derives from its own sliding
+    // window at load.
+    int codec_chunk_frames;
+    int codec_left_ctx_frames;
+
     CodecSpecials              codec_specials;
     TextSpecials               text_specials;
     std::vector<LanguageEntry> languages;
@@ -172,15 +179,18 @@ struct PipelineTTS {
 // invalid metadata. use_fa is gated on bp.has_gpu inside the load:
 // CPU only runs always use the manual F32 attention chain. clamp_fp16
 // is forwarded as is. max_batch sizes the KV sets, the bridge columns
-// and the maximum concurrent slots (minimum 1). Caller frees with
-// pipeline_tts_free.
+// and the maximum concurrent slots (minimum 1). codec_chunk_sec
+// converts to the chunk width every buffered decode on this handle
+// runs with; the left context that pairs with it derives from the
+// codec's own sliding window. Caller frees with pipeline_tts_free.
 bool pipeline_tts_load(PipelineTTS * pt,
                        const char *  talker_gguf_path,
                        const char *  codec_gguf_path,
                        BackendPair   bp,
                        bool          use_fa,
                        bool          clamp_fp16,
-                       int           max_batch);
+                       int           max_batch,
+                       float         codec_chunk_sec);
 
 void pipeline_tts_free(PipelineTTS * pt);
 

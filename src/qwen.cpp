@@ -212,6 +212,10 @@ void qt_log_set(qt_log_cb cb, void * user_data) {
     g_log_cb.store(cb, std::memory_order_release);
 }
 
+// Codec chunk default, shared by qt_init_default_params and the
+// qt_init resolution of an unset value.
+static const float QT_CODEC_CHUNK_SEC_DEFAULT = 24.0f;
+
 void qt_init_default_params(struct qt_init_params * p) {
     p->abi_version = QT_ABI_VERSION;
     p->talker_path = nullptr;
@@ -219,39 +223,39 @@ void qt_init_default_params(struct qt_init_params * p) {
     p->use_fa      = true;
     p->clamp_fp16  = false;
     p->max_batch   = 1;
+
+    p->codec_chunk_sec = QT_CODEC_CHUNK_SEC_DEFAULT;
 }
 
 void qt_tts_default_params(struct qt_tts_params * p) {
-    p->abi_version            = QT_ABI_VERSION;
-    p->text                   = nullptr;
-    p->lang                   = nullptr;
-    p->instruct               = nullptr;
-    p->speaker                = nullptr;
-    p->ref_audio_24k          = nullptr;
-    p->ref_n_samples          = 0;
-    p->ref_text               = nullptr;
-    p->seed                   = -1;
-    p->max_new_tokens         = 2048;
-    p->do_sample              = true;
-    p->temperature            = 0.9f;
-    p->top_k                  = 50;
-    p->top_p                  = 1.0f;
-    p->repetition_penalty     = 1.05f;
-    p->subtalker_do_sample    = true;
-    p->subtalker_temperature  = 0.9f;
-    p->subtalker_top_k        = 50;
-    p->subtalker_top_p        = 1.0f;
-    p->dump_dir               = nullptr;
-    p->cancel                 = nullptr;
-    p->cancel_user_data       = nullptr;
-    p->on_chunk               = nullptr;
-    p->on_chunk_user_data     = nullptr;
-    p->codec_chunk_sec        = 24.0f;
-    p->codec_left_context_sec = 2.0f;
-    p->ref_spk_emb            = nullptr;
-    p->ref_spk_dim            = 0;
-    p->ref_codes              = nullptr;
-    p->ref_T                  = 0;
+    p->abi_version           = QT_ABI_VERSION;
+    p->text                  = nullptr;
+    p->lang                  = nullptr;
+    p->instruct              = nullptr;
+    p->speaker               = nullptr;
+    p->ref_audio_24k         = nullptr;
+    p->ref_n_samples         = 0;
+    p->ref_text              = nullptr;
+    p->seed                  = -1;
+    p->max_new_tokens        = 2048;
+    p->do_sample             = true;
+    p->temperature           = 0.9f;
+    p->top_k                 = 50;
+    p->top_p                 = 1.0f;
+    p->repetition_penalty    = 1.05f;
+    p->subtalker_do_sample   = true;
+    p->subtalker_temperature = 0.9f;
+    p->subtalker_top_k       = 50;
+    p->subtalker_top_p       = 1.0f;
+    p->dump_dir              = nullptr;
+    p->cancel                = nullptr;
+    p->cancel_user_data      = nullptr;
+    p->on_chunk              = nullptr;
+    p->on_chunk_user_data    = nullptr;
+    p->ref_spk_emb           = nullptr;
+    p->ref_spk_dim           = 0;
+    p->ref_codes             = nullptr;
+    p->ref_T                 = 0;
 }
 
 int qt_num_codebooks(const struct qt_context * q) {
@@ -324,18 +328,21 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
         qt_log(QT_LOG_ERROR, "[Qwen] qt_init requires talker_path and codec_path");
         return nullptr;
     }
-    if (params->abi_version > QT_ABI_VERSION) {
-        qt_set_error("qt_init: params->abi_version %d > QT_ABI_VERSION %d (binding compiled against a newer header)",
-                     params->abi_version, QT_ABI_VERSION);
-        qt_log(QT_LOG_ERROR, "[Qwen] qt_init params struct is from a newer ABI (%d > %d)", params->abi_version,
-               QT_ABI_VERSION);
+    if (params->abi_version > QT_ABI_VERSION || params->abi_version < QT_ABI_MIN_VERSION) {
+        qt_set_error("qt_init: params->abi_version %d outside the supported range [%d, %d]", params->abi_version,
+                     QT_ABI_MIN_VERSION, QT_ABI_VERSION);
+        qt_log(QT_LOG_ERROR, "[Qwen] qt_init params struct carries an unsupported ABI (%d, supported [%d, %d])",
+               params->abi_version, QT_ABI_MIN_VERSION, QT_ABI_VERSION);
         return nullptr;
     }
 
     qt_log(QT_LOG_INFO, "[Qwen] qwentts.cpp %s", qt_version());
 
-    // ABI v3 tail field: zero init from older callers means 1.
-    const int max_batch = (params->abi_version >= 3 && params->max_batch > 1) ? params->max_batch : 1;
+    const int max_batch = params->max_batch > 1 ? params->max_batch : 1;
+
+    // The chunk width resolves once here: it is a property of the
+    // handle, read by every buffered decode it runs.
+    const float chunk_sec = params->codec_chunk_sec > 0.0f ? params->codec_chunk_sec : QT_CODEC_CHUNK_SEC_DEFAULT;
 
     // new qt_context() value-initialises every field: POD aggregates
     // (BackendPair, PipelineTTS) are zero-init, std containers in
@@ -355,7 +362,7 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
         }
 
         if (!pipeline_tts_load(&q->pt, params->talker_path, params->codec_path, q->bp, params->use_fa,
-                               params->clamp_fp16, max_batch)) {
+                               params->clamp_fp16, max_batch, chunk_sec)) {
             qt_throw("qt_init: pipeline_tts_load failed for '%s' / '%s'", params->talker_path, params->codec_path);
         }
 
@@ -553,10 +560,9 @@ enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params *
         qt_set_error("qt_synthesize: out is NULL in buffered mode");
         return QT_STATUS_INVALID_PARAMS;
     }
-    if (params->abi_version > QT_ABI_VERSION) {
-        qt_set_error(
-            "qt_synthesize: params->abi_version %d > QT_ABI_VERSION %d (binding compiled against a newer header)",
-            params->abi_version, QT_ABI_VERSION);
+    if (params->abi_version > QT_ABI_VERSION || params->abi_version < QT_ABI_MIN_VERSION) {
+        qt_set_error("qt_synthesize: params->abi_version %d outside the supported range [%d, %d]", params->abi_version,
+                     QT_ABI_MIN_VERSION, QT_ABI_VERSION);
         if (out) {
             qt_audio_free(out);
         }
@@ -606,9 +612,8 @@ enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params *
         }
         return QT_STATUS_MODE_INVALID;
     }
-    // ABI v2 latent reference fields, same gate as the pipeline.
-    const bool has_lat_spk   = params->abi_version >= 2 && params->ref_spk_emb && params->ref_spk_dim > 0;
-    const bool has_lat_codes = params->abi_version >= 2 && params->ref_codes && params->ref_T > 0;
+    const bool has_lat_spk   = params->ref_spk_emb && params->ref_spk_dim > 0;
+    const bool has_lat_codes = params->ref_codes && params->ref_T > 0;
 
     if ((params->ref_audio_24k || has_lat_spk) && mt != "base") {
         qt_set_error("--ref-wav / --ref-spk is only valid for base models (loaded: %s)", mt.c_str());

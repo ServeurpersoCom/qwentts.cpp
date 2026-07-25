@@ -68,10 +68,13 @@ int main(void) {
     qt_tts_default_params(&params);
 
     /* Sanity-check a few default values, including the abi_version and
-     * the new use_fa / clamp_fp16 / on_chunk / codec_chunk_sec /
-     * codec_left_context_sec slots. */
-    if (params.max_new_tokens != 2048 || params.codec_chunk_sec <= 0.0f || params.codec_left_context_sec < 0.0f) {
+     * the use_fa / clamp_fp16 / on_chunk / codec framing slots. */
+    if (params.max_new_tokens != 2048) {
         fprintf(stderr, "[Probe] default values do not match\n");
+        return 1;
+    }
+    if (iparams.codec_chunk_sec <= 0.0f || iparams.max_batch != 1) {
+        fprintf(stderr, "[Probe] init_params chunk / max_batch defaults do not match\n");
         return 1;
     }
     if (iparams.abi_version != QT_ABI_VERSION || params.abi_version != QT_ABI_VERSION) {
@@ -146,6 +149,29 @@ int main(void) {
     if (rejected != NULL) {
         fprintf(stderr, "[Probe] qt_init accepted a future abi_version\n");
         qt_free(rejected);
+        return 8;
+    }
+    /* The paths point at a file that does not exist, so a NULL return
+     * alone does not prove the ABI gate fired : the error string must
+     * name the range check, not a failed GGUF open. */
+    if (strstr(qt_last_error(), "supported range") == NULL) {
+        fprintf(stderr, "[Probe] future abi_version rejection did not come from the range check: '%s'\n",
+                qt_last_error());
+        return 8;
+    }
+
+    /* The floor is the other half of the range check : a struct laid out
+     * by a pre-QT_ABI_MIN_VERSION header must be rejected just as hard. */
+    future_iparams.abi_version = QT_ABI_MIN_VERSION - 1;
+    rejected                   = qt_init(&future_iparams);
+    if (rejected != NULL) {
+        fprintf(stderr, "[Probe] qt_init accepted an abi_version below the floor\n");
+        qt_free(rejected);
+        return 8;
+    }
+    if (strstr(qt_last_error(), "supported range") == NULL) {
+        fprintf(stderr, "[Probe] floor abi_version rejection did not come from the range check: '%s'\n",
+                qt_last_error());
         return 8;
     }
 

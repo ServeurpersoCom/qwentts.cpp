@@ -44,20 +44,28 @@ extern "C" {
 #    define QT_API
 #endif
 
-// Struct ABI version. Incremented every time a public POD struct grows a
-// new field at the end. Callers fill `.abi_version = QT_ABI_VERSION`
-// (or let qwen_*_default_params set it). Entries that consume those
-// structs reject inputs whose abi_version exceeds the build-time
-// constant: this guards a binary built against vN from receiving a
-// struct laid out for vN+1 by a freshly compiled binding. Adding fields
-// stays backward compat because the new tail is zero init in older
-// callers and the lib reads only what its abi_version permits.
+// Struct ABI version. Incremented every time a public POD struct
+// changes layout. Callers fill `.abi_version = QT_ABI_VERSION` (or let
+// qwen_*_default_params set it). Entries that consume those structs
+// accept the closed range [QT_ABI_MIN_VERSION, QT_ABI_VERSION] and
+// reject anything outside it with a diagnostic rather than reading
+// fields at offsets the caller never wrote: above the ceiling the
+// struct comes from a newer header, below the floor it carries a
+// layout this build no longer addresses. Fields appended at the tail
+// keep older callers valid down to the floor, since their unwritten
+// tail is zero init and the lib gates on abi_version before reading it.
 //
 // There is no separate semver triple. The runtime build identity is the
 // git short hash + commit date string returned by qt_version(); for
 // binding compat checks, QT_ABI_VERSION is the only number that
 // matters.
-#define QT_ABI_VERSION 3
+#define QT_ABI_VERSION 4
+
+// Oldest struct layout this build addresses. A v3 or older
+// qt_tts_params places its trailing fields at offsets this build does
+// not map, so such a struct is unreadable here and its caller rebuilds
+// against this header.
+#define QT_ABI_MIN_VERSION 4
 
 // Returns a static string of the form "<git-hash> (<date>)" identifying
 // the exact commit this binary was built from. Safe to call from any
@@ -134,10 +142,27 @@ struct qt_init_params {
     // back into the qwen_* API. qt_synthesize itself stays blocking
     // and thread safe in both modes.
     int max_batch;
+
+    // ABI v4. Chunk width of the buffered codec decode, in seconds of
+    // audio, resolved to an integer frame count at the codec frame rate
+    // by qt_init and applied to every synthesis on the handle. A chunk
+    // shorter than the utterance bounds the peak decode memory; the
+    // decode window is that chunk plus the left context the decoder
+    // needs to start warm, which qt_init derives from the codec's own
+    // sliding window rather than taking from the caller. Peak memory
+    // therefore floors at that warmup, and driving the chunk below it
+    // buys no memory while costing one redecode of the context per
+    // chunk. A chunk covering the whole utterance decodes in a single
+    // pass and is the exact reference; any split leaves a residual on
+    // the order of -50 dB. 0 selects the upstream default, 24.0 (300
+    // frames at 12.5 Hz). The streaming path frames its own chunks
+    // through the persistent codec stream state and reads none of this.
+    float codec_chunk_sec;
 };
 
 // Initialise to the standard defaults: both paths NULL (caller must set
-// them before calling qt_init), use_fa true, clamp_fp16 false.
+// them before calling qt_init), use_fa true, clamp_fp16 false,
+// max_batch 1, codec_chunk_sec 24.0.
 QT_API void qt_init_default_params(struct qt_init_params * p);
 
 // Allocate every module described by params. Returns NULL on any
@@ -203,10 +228,11 @@ typedef bool (*qt_cancel_cb)(void * user_data);
 // 24 kHz; valid only for the duration of the call.
 // user_data is forwarded verbatim from on_chunk_user_data.
 //
-// The chunk granularity is driven by chunk_duration_sec in qt_tts_params:
-// once the AR loop has produced enough frames to cover that duration,
-// the codec decodes that bundle and emits it. The last chunk on EOS /
-// max_new flushes whatever frames remain.
+// The chunk granularity is a ramp over the persistent codec stream
+// state: the first flush covers a single 12.5 Hz frame for the lowest
+// time to first audio, then the target width doubles up to 8 frames as
+// the stream settles. The last chunk on EOS / max_new flushes whatever
+// frames remain.
 typedef bool (*qt_audio_chunk_cb)(const float * samples, int n_samples, void * user_data);
 
 // Log severity. Numerically ordered so a callback can filter with a
@@ -311,21 +337,6 @@ struct qt_tts_params {
     qt_audio_chunk_cb on_chunk;
     void *            on_chunk_user_data;
 
-    // Codec decode framing. Applied to both the streaming path (chunk
-    // by chunk emission) and the buffered path (one shot decode at the
-    // end) : the chunked decode rolls a left context window across the
-    // codec frames to avoid edge artefacts at chunk boundaries. The
-    // first chunk has its left context collapsed to whatever is
-    // available, matching the upstream Qwen3-TTS 12 Hz tokenizer
-    // chunked_decode rule. Defaults match the upstream reference :
-    // codec_chunk_sec 24.0 (300 frames at 12.5 Hz) and
-    // codec_left_context_sec 2.0 (25 frames at 12.5 Hz). Values are
-    // converted internally to integer frame counts via the codec frame
-    // rate ; codec_chunk_sec clamps to >= 1 frame, codec_left_context_sec
-    // clamps to >= 0 frames.
-    float codec_chunk_sec;
-    float codec_left_context_sec;
-
     // ABI v2. Pre-encoded voice reference, the latent counterpart of
     // ref_audio_24k. ref_spk_emb is the speaker embedding produced by
     // the speaker encoder (ref_spk_dim f32 values, must equal the
@@ -343,8 +354,7 @@ struct qt_tts_params {
 // Initialise to the standard defaults. Strings NULL, seed -1,
 // max_new_tokens 2048, do_sample true, temperature 0.9, top_k 50,
 // top_p 1.0, repetition_penalty 1.05, subtalker mirrors talker,
-// dump_dir NULL, cancel NULL, on_chunk NULL, codec_chunk_sec 24.0,
-// codec_left_context_sec 2.0.
+// dump_dir NULL, cancel NULL, on_chunk NULL.
 QT_API void qt_tts_default_params(struct qt_tts_params * p);
 
 // Number of RVQ codebooks (K) of the loaded codec. Pre-encoded ICL

@@ -54,7 +54,6 @@ static void print_usage(const char * prog) {
             "  --ref-text <path>       Transcript file for the reference (enables ICL clone mode)\n"
             "  --max-new <n>           Max new audio frames (default: 2048)\n"
             "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 24.0)\n"
-            "  --codec-left-dur <f>    Codec decode left context duration in seconds (default: 2.0)\n"
             "  --stream-by-line        Flush synthesis at each newline, one WAV header per line (-o '-')\n\n"
             "Sampling:\n"
             "  --seed <int>            Sampling seed (default: -1 for random)\n"
@@ -101,7 +100,6 @@ struct Args {
     bool         clamp_fp16;
     bool         stream_by_line;
     float        codec_chunk_sec;
-    float        codec_left_context_sec;
 };
 
 // Read all of stdin into a string. Binary mode on Windows so UTF-16 input
@@ -180,25 +178,26 @@ static bool read_text_file(const char * path, std::string & out) {
 }
 
 static bool parse_args(int argc, char ** argv, Args & a) {
-    a                        = {};
-    a.lang                   = "auto";
-    a.format                 = "wav16";
-    a.max_new_tokens         = 2048;
-    a.seed                   = -1;
-    a.do_sample              = true;
-    a.temperature            = 0.9f;
-    a.top_k                  = 50;
-    a.top_p                  = 1.0f;
-    a.repetition_penalty     = 1.05f;
-    a.subtalker_do_sample    = true;
-    a.subtalker_top_k        = 50;
-    a.subtalker_top_p        = 1.0f;
-    a.subtalker_temperature  = 0.9f;
-    a.use_fa                 = true;
-    a.clamp_fp16             = false;
-    a.stream_by_line         = false;
-    a.codec_chunk_sec        = 24.0f;
-    a.codec_left_context_sec = 2.0f;
+    a                       = {};
+    a.lang                  = "auto";
+    a.format                = "wav16";
+    a.max_new_tokens        = 2048;
+    a.seed                  = -1;
+    a.do_sample             = true;
+    a.temperature           = 0.9f;
+    a.top_k                 = 50;
+    a.top_p                 = 1.0f;
+    a.repetition_penalty    = 1.05f;
+    a.subtalker_do_sample   = true;
+    a.subtalker_top_k       = 50;
+    a.subtalker_top_p       = 1.0f;
+    a.subtalker_temperature = 0.9f;
+    a.use_fa                = true;
+    a.clamp_fp16            = false;
+    a.stream_by_line        = false;
+    // Chunk sentinel : qt_init resolves a non positive value to the
+    // library default.
+    a.codec_chunk_sec       = 0.0f;
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
         if (std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--help") == 0) {
@@ -260,8 +259,6 @@ static bool parse_args(int argc, char ** argv, Args & a) {
             a.stream_by_line = true;
         } else if (std::strcmp(arg, "--codec-chunk-dur") == 0 && i + 1 < argc) {
             a.codec_chunk_sec = (float) std::atof(argv[++i]);
-        } else if (std::strcmp(arg, "--codec-left-dur") == 0 && i + 1 < argc) {
-            a.codec_left_context_sec = (float) std::atof(argv[++i]);
         } else if (std::strcmp(arg, "-o") == 0 && i + 1 < argc) {
             a.out_wav = argv[++i];
         } else {
@@ -279,10 +276,11 @@ static int run(const Args & a) {
     // off the two GGUF paths and reports qt_last_error on failure.
     qt_init_params iparams;
     qt_init_default_params(&iparams);
-    iparams.talker_path = a.model;
-    iparams.codec_path  = a.codec;
-    iparams.use_fa      = a.use_fa;
-    iparams.clamp_fp16  = a.clamp_fp16;
+    iparams.talker_path     = a.model;
+    iparams.codec_path      = a.codec;
+    iparams.use_fa          = a.use_fa;
+    iparams.clamp_fp16      = a.clamp_fp16;
+    iparams.codec_chunk_sec = a.codec_chunk_sec;
 
     qt_context * q = qt_init(&iparams);
     if (!q) {
@@ -391,31 +389,29 @@ static int run(const Args & a) {
     // verbatim and resolved by qt_synthesize via std::random_device.
     qt_tts_params params;
     qt_tts_default_params(&params);
-    params.text                   = text;
-    params.lang                   = a.lang;
-    params.instruct               = a.instruct;
-    params.speaker                = a.speaker;
-    params.ref_audio_24k          = ref_audio_24k;
-    params.ref_n_samples          = ref_n_samples;
-    params.ref_text               = ref_text;
-    params.ref_spk_emb            = ref_spk_emb.empty() ? NULL : ref_spk_emb.data();
-    params.ref_spk_dim            = (int) ref_spk_emb.size();
-    params.ref_codes              = ref_codes.empty() ? NULL : ref_codes.data();
-    params.ref_T                  = ref_T;
-    params.seed                   = a.seed;
-    params.max_new_tokens         = a.max_new_tokens;
-    params.do_sample              = a.do_sample;
-    params.temperature            = a.temperature;
-    params.top_k                  = a.top_k;
-    params.top_p                  = a.top_p;
-    params.repetition_penalty     = a.repetition_penalty;
-    params.subtalker_do_sample    = a.subtalker_do_sample;
-    params.subtalker_temperature  = a.subtalker_temperature;
-    params.subtalker_top_k        = a.subtalker_top_k;
-    params.subtalker_top_p        = a.subtalker_top_p;
-    params.dump_dir               = a.dump_dir;
-    params.codec_chunk_sec        = a.codec_chunk_sec;
-    params.codec_left_context_sec = a.codec_left_context_sec;
+    params.text                  = text;
+    params.lang                  = a.lang;
+    params.instruct              = a.instruct;
+    params.speaker               = a.speaker;
+    params.ref_audio_24k         = ref_audio_24k;
+    params.ref_n_samples         = ref_n_samples;
+    params.ref_text              = ref_text;
+    params.ref_spk_emb           = ref_spk_emb.empty() ? NULL : ref_spk_emb.data();
+    params.ref_spk_dim           = (int) ref_spk_emb.size();
+    params.ref_codes             = ref_codes.empty() ? NULL : ref_codes.data();
+    params.ref_T                 = ref_T;
+    params.seed                  = a.seed;
+    params.max_new_tokens        = a.max_new_tokens;
+    params.do_sample             = a.do_sample;
+    params.temperature           = a.temperature;
+    params.top_k                 = a.top_k;
+    params.top_p                 = a.top_p;
+    params.repetition_penalty    = a.repetition_penalty;
+    params.subtalker_do_sample   = a.subtalker_do_sample;
+    params.subtalker_temperature = a.subtalker_temperature;
+    params.subtalker_top_k       = a.subtalker_top_k;
+    params.subtalker_top_p       = a.subtalker_top_p;
+    params.dump_dir              = a.dump_dir;
 
     if (stream_to_stdout) {
         wav_stream ws = {};
