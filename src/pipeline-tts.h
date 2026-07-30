@@ -19,6 +19,7 @@
 #include "kv-cache.h"
 #include "pipeline-codec.h"
 #include "qwen.h"
+#include "sampling-graph.h"
 #include "speaker-encoder-weights.h"
 #include "talker-decode-graph.h"
 #include "talker-weights.h"
@@ -90,12 +91,35 @@ struct PromptCache {
     size_t                              max_prefix_entries;
 };
 
-// One set of static predictor graphs for a given batch width: the T=2
-// prefill plus one T=1 step per acoustic codebook after the first.
+// One set of static predictor graphs for a given batch width: the
+// frame graph replays the prefill and every acoustic step in one
+// compute, the fused flavor appends the codec stream tail. The
+// sampler inputs and the codes accumulator live in their own context
+// backed by a persistent backend buffer: every graph of the set reads
+// and writes them across replays, so they never enter gallocr pools.
 struct CodePredGraphSet {
-    CodePredGraph              prefill;
-    std::vector<CodePredGraph> steps;
+    CodePredGraph         frame;  // prefill and every acoustic step in one cgraph
+    CodePredGraph         fused;  // frame graph with the codec stream tail appended
+    CodecStreamTail       tail;   // codec side of the fused graph, tensors live in fused.ctx
+    SamplerInputs         sampler;
+    struct ggml_context * sampler_ctx = nullptr;
+    ggml_backend_buffer_t sampler_buf = nullptr;
 };
+
+static inline void code_predictor_graph_set_free(CodePredGraphSet * s) {
+    code_predictor_graph_free(&s->frame);
+    code_predictor_graph_free(&s->fused);
+    s->tail = {};
+    if (s->sampler_buf) {
+        ggml_backend_buffer_free(s->sampler_buf);
+        s->sampler_buf = nullptr;
+    }
+    if (s->sampler_ctx) {
+        ggml_free(s->sampler_ctx);
+        s->sampler_ctx = nullptr;
+    }
+    s->sampler = SamplerInputs();
+}
 
 struct PipelineTTS {
     GGUFModel             gguf_talker;
@@ -146,6 +170,7 @@ struct PipelineTTS {
     // on sub Ampere CUDA targets.
     bool use_flash_attn;
     bool clamp_fp16;
+    bool codec_fused;  // frame graph carries the codec stream tail, single slot latency mode
 
     // Persistent KV caches, one set per slot: the talker holds the LM
     // contexts, the predictor holds one frame's 16 sub-steps per slot,
@@ -190,7 +215,8 @@ bool pipeline_tts_load(PipelineTTS * pt,
                        bool          use_fa,
                        bool          clamp_fp16,
                        int           max_batch,
-                       float         codec_chunk_sec);
+                       float         codec_chunk_sec,
+                       bool          codec_fused);
 
 void pipeline_tts_free(PipelineTTS * pt);
 

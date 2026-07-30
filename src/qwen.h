@@ -157,11 +157,19 @@ struct qt_init_params {
     // frames at 12.5 Hz). The streaming path frames its own chunks
     // through the persistent codec stream state and reads none of this.
     float codec_chunk_sec;
+
+    // Fuse the codec streaming tail into the predictor frame graph:
+    // one compute per frame delivers its 80 ms audio chunk with no
+    // host round trip between the predictor and the decode. Single
+    // slot latency mode: requires max_batch 1 and a streaming
+    // synthesis (on_chunk); throughput drops against the buffered
+    // flush, which stays the default.
+    bool codec_fused;
 };
 
 // Initialise to the standard defaults: both paths NULL (caller must set
 // them before calling qt_init), use_fa true, clamp_fp16 false,
-// max_batch 1, codec_chunk_sec 24.0.
+// max_batch 1, codec_chunk_sec 24.0, codec_fused false.
 QT_API void qt_init_default_params(struct qt_init_params * p);
 
 // Allocate every module described by params. Returns NULL on any

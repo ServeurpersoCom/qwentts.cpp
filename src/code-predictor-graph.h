@@ -13,7 +13,6 @@ struct CodePredGraph {
     struct ggml_context * ctx    = nullptr;
     struct ggml_cgraph *  gf     = nullptr;
     ggml_gallocr_t        galloc = nullptr;
-    struct ggml_tensor *  ids_in = nullptr;  // [N] i32, one code id per slot
     struct ggml_tensor *  logits = nullptr;  // [Vg, N] f32
     int                   N      = 0;        // batch width this build covers
 };
@@ -28,7 +27,6 @@ static void code_predictor_graph_free(CodePredGraph * cp) {
         cp->ctx = nullptr;
     }
     cp->gf     = nullptr;
-    cp->ids_in = nullptr;
     cp->logits = nullptr;
     cp->N      = 0;
 }

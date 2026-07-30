@@ -478,6 +478,66 @@ void pipeline_codec_snap_free(CodecStateSnap * s) {
     *s = {};
 }
 
+// Append the streaming decode chain to an existing graph: quantizer,
+// pre conv, sliding window transformer, upsample stage and DAC, all
+// threaded through the [set0, set0 + M) slices of the persistent
+// stream state. codes_in [T, K, M] i32, pos_in [T * M] i32, rows_in
+// [T, 1, M] i64 and mask_in [ring, T, 1, M] f32 come from the caller.
+// Returns the clamped audio tensor [T * hop, 1, M], expanded into gf.
+static struct ggml_tensor * codec_stream_chain_append(PipelineCodec *       pc,
+                                                      struct ggml_context * gctx,
+                                                      struct ggml_cgraph *  gf,
+                                                      struct ggml_tensor *  codes_in,
+                                                      struct ggml_tensor *  pos_in,
+                                                      struct ggml_tensor *  rows_in,
+                                                      struct ggml_tensor *  mask_in,
+                                                      int                   set0,
+                                                      int                   M) {
+    // Lane state slices [t, c, M] at set0: contiguous suffix or prefix
+    // spans of the [t, c, S] owners, so views reshape freely.
+    auto slice = [&](struct ggml_tensor * owner) {
+        return ggml_view_3d(gctx, owner, owner->ne[0], owner->ne[1], M, owner->nb[1], owner->nb[2],
+                            (size_t) set0 * owner->nb[2]);
+    };
+    QwenUpsampleStreamState up_sl;
+    QwenDACStreamState      dac_sl;
+    for (int i = 0; i < pc->upsample.num_blocks; i++) {
+        up_sl.dw[i] = slice(pc->stream_up.dw[i]);
+    }
+    dac_sl.pre = slice(pc->stream_dac.pre);
+    for (int i = 0; i < DAC_NUM_BLOCKS; i++) {
+        dac_sl.carry[i] = slice(pc->stream_dac.carry[i]);
+        for (int r = 0; r < DAC_RES_UNITS; r++) {
+            dac_sl.ru[i][r] = slice(pc->stream_dac.ru[i][r]);
+        }
+    }
+    dac_sl.post = slice(pc->stream_dac.post);
+
+    // KVCache facade over the lane set span: reuse the multi-set ring
+    // tensors with per graph 4D views built inside tok_trans; staging
+    // binds the last set through a single set span.
+    KVCache * kv = &pc->stream_kv;
+
+    // Same module chain as pipeline_codec_decode with the stateful
+    // batched variants threaded through the persistent stream slices.
+    // The quantizer uses the alignment safe variant: no scheduler input
+    // duplication happens on the direct backend compute path. Codes
+    // flatten to [T * M, K] column gathers via the lane major layout.
+    struct ggml_tensor * h = quant_decode_stream_batch(gctx, &pc->qdec, codes_in);  // [512, T, M] C-first
+    h                      = ggml_cont(gctx, ggml_transpose(gctx, h));              // [T, 512, M] T-first
+    h = qwen_causal_conv1d_stream(gctx, gf, pc->pre_conv_w, pc->pre_conv_b, h, 3, 1, slice(pc->stream_pre_conv));
+    h = ggml_cont(gctx, ggml_transpose(gctx, h));                                   // [1024, T, M] C-first
+    h = tok_trans_forward_stream_span(gctx, gf, &pc->transformer, h, pos_in, mask_in, rows_in, kv, set0, M);
+    h = ggml_cont(gctx, ggml_transpose(gctx, h));                                   // [T, 1024, M] T-first
+    h = upsample_stage_forward_stream(gctx, gf, &pc->upsample, h, &up_sl);
+    h = dac_decoder_forward_stream(gctx, gf, &pc->dac, h, &dac_sl);
+    h = ggml_clamp(gctx, h, -1.0f, 1.0f);
+    ggml_set_name(h, "audio_out");
+    ggml_set_output(h);
+    ggml_build_forward_expand(gf, h);
+    return h;
+}
+
 // Build the static stream graph of chunk width T = 1 << cls: the
 // same module chain as the T=1 frame graph, every stream state and
 // KV ring tensor shared across classes, inputs and intermediates
@@ -527,48 +587,7 @@ static bool codec_stream_graph_build(PipelineCodec * pc, int cls, int M, bool st
     ggml_set_input(rows_in);
     ggml_set_input(mask_in);
 
-    // Lane state slices [t, c, M] at set0: contiguous suffix or prefix
-    // spans of the [t, c, S] owners, so views reshape freely.
-    auto slice = [&](struct ggml_tensor * owner) {
-        return ggml_view_3d(gctx, owner, owner->ne[0], owner->ne[1], M, owner->nb[1], owner->nb[2],
-                            (size_t) set0 * owner->nb[2]);
-    };
-    QwenUpsampleStreamState up_sl;
-    QwenDACStreamState      dac_sl;
-    for (int i = 0; i < pc->upsample.num_blocks; i++) {
-        up_sl.dw[i] = slice(pc->stream_up.dw[i]);
-    }
-    dac_sl.pre = slice(pc->stream_dac.pre);
-    for (int i = 0; i < DAC_NUM_BLOCKS; i++) {
-        dac_sl.carry[i] = slice(pc->stream_dac.carry[i]);
-        for (int r = 0; r < DAC_RES_UNITS; r++) {
-            dac_sl.ru[i][r] = slice(pc->stream_dac.ru[i][r]);
-        }
-    }
-    dac_sl.post = slice(pc->stream_dac.post);
-
-    // KVCache facade over the lane set span: reuse the multi-set ring
-    // tensors with per graph 4D views built inside tok_trans; staging
-    // binds the last set through a single set span.
-    KVCache * kv = &pc->stream_kv;
-
-    // Same module chain as pipeline_codec_decode with the stateful
-    // batched variants threaded through the persistent stream slices.
-    // The quantizer uses the alignment safe variant: no scheduler input
-    // duplication happens on the direct backend compute path. Codes
-    // flatten to [T * M, K] column gathers via the lane major layout.
-    struct ggml_tensor * h = quant_decode_stream_batch(gctx, &pc->qdec, codes_in);  // [512, T, M] C-first
-    h                      = ggml_cont(gctx, ggml_transpose(gctx, h));              // [T, 512, M] T-first
-    h = qwen_causal_conv1d_stream(gctx, gf, pc->pre_conv_w, pc->pre_conv_b, h, 3, 1, slice(pc->stream_pre_conv));
-    h = ggml_cont(gctx, ggml_transpose(gctx, h));                                   // [1024, T, M] C-first
-    h = tok_trans_forward_stream_span(gctx, gf, &pc->transformer, h, pos_in, mask_in, rows_in, kv, set0, M);
-    h = ggml_cont(gctx, ggml_transpose(gctx, h));                                   // [T, 1024, M] T-first
-    h = upsample_stage_forward_stream(gctx, gf, &pc->upsample, h, &up_sl);
-    h = dac_decoder_forward_stream(gctx, gf, &pc->dac, h, &dac_sl);
-    h = ggml_clamp(gctx, h, -1.0f, 1.0f);
-    ggml_set_name(h, "audio_out");
-    ggml_set_output(h);
-    ggml_build_forward_expand(gf, h);
+    struct ggml_tensor * h = codec_stream_chain_append(pc, gctx, gf, codes_in, pos_in, rows_in, mask_in, set0, M);
 
     sg->galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(pc->backend));
     if (!sg->galloc || !ggml_gallocr_alloc_graph(sg->galloc, gf)) {
@@ -666,6 +685,97 @@ bool pipeline_codec_decode_stream_batch(PipelineCodec * pc, const int32_t * code
         return false;
     }
     return codec_stream_run(pc, sg, codes, T, M, 0, audio_out);
+}
+
+// Append the fused streaming tail: ring inputs created here, the chain
+// appended over the lane sets [set0 = 0, M). The caller owns gctx/gf
+// and allocates the whole graph afterwards.
+bool pipeline_codec_stream_tail_append(PipelineCodec *       pc,
+                                       struct ggml_context * gctx,
+                                       struct ggml_cgraph *  gf,
+                                       struct ggml_tensor *  codes_in,
+                                       int                   T,
+                                       int                   M,
+                                       CodecStreamTail *     tail) {
+    const int ring = CODEC_STREAM_RING;
+    if (!pc->stream_ready) {
+        qt_log(QT_LOG_ERROR, "[Pipeline] stream tail append before stream state init");
+        return false;
+    }
+    if (pc->transformer.sliding_window + T > ring) {
+        qt_log(QT_LOG_ERROR, "[Pipeline] sliding window %d plus chunk %d exceeds KV ring %d",
+               pc->transformer.sliding_window, T, ring);
+        return false;
+    }
+    if (M < 1 || M > pc->stream_sets - 1) {
+        qt_log(QT_LOG_ERROR, "[Pipeline] invalid stream tail lane count %d", M);
+        return false;
+    }
+
+    tail->T = T;
+    tail->M = M;
+
+    tail->pos  = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, T * M);
+    tail->rows = ggml_new_tensor_3d(gctx, GGML_TYPE_I64, T, 1, M);
+    tail->mask = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, ring, T, 1, M);
+    ggml_set_name(tail->pos, "codec_positions");
+    ggml_set_name(tail->rows, "codec_kv_rows");
+    ggml_set_name(tail->mask, "codec_ring_mask");
+    ggml_set_input(tail->pos);
+    ggml_set_input(tail->rows);
+    ggml_set_input(tail->mask);
+
+    tail->out = codec_stream_chain_append(pc, gctx, gf, codes_in, tail->pos, tail->rows, tail->mask, 0, M);
+    return tail->out != NULL;
+}
+
+// Upload the per frame ring inputs of the fused tail from the lane
+// positions at [set0, set0 + M).
+bool pipeline_codec_stream_tail_upload(PipelineCodec * pc, CodecStreamTail * tail, int set0) {
+    const int T    = tail->T;
+    const int M    = tail->M;
+    const int ring = CODEC_STREAM_RING;
+    if (!tail->out) {
+        return false;
+    }
+
+    tail->pos_buf.resize((size_t) T * (size_t) M);
+    tail->rows_buf.resize((size_t) T * (size_t) M);
+    static thread_local std::vector<int> pos0;
+    pos0.assign((size_t) M, 0);
+    for (int m = 0; m < M; m++) {
+        int p   = pc->stream_pos[(size_t) (set0 + m)];
+        pos0[m] = p;
+        for (int t = 0; t < T; t++) {
+            tail->pos_buf[(size_t) m * (size_t) T + (size_t) t]  = p + t;
+            tail->rows_buf[(size_t) m * (size_t) T + (size_t) t] = (int64_t) ((p + t) % ring);
+        }
+    }
+    ggml_backend_tensor_set(tail->pos, tail->pos_buf.data(), 0, tail->pos_buf.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(tail->rows, tail->rows_buf.data(), 0, tail->rows_buf.size() * sizeof(int64_t));
+
+    tok_trans_build_stream_mask(pos0.data(), T, M, ring, pc->transformer.sliding_window, tail->mask_buf);
+    ggml_backend_tensor_set(tail->mask, tail->mask_buf.data(), 0, tail->mask_buf.size() * sizeof(float));
+    return true;
+}
+
+// Read every non NULL lane's audio from the fused tail output and
+// advance the lane positions. The caller has computed the graph.
+bool pipeline_codec_stream_tail_read(PipelineCodec * pc, CodecStreamTail * tail, int set0, float ** audio_out) {
+    const int T = tail->T;
+    const int M = tail->M;
+    if (!tail->out) {
+        return false;
+    }
+    const size_t lane_samples = (size_t) T * (size_t) TOKENIZER_HOP_LENGTH;
+    for (int m = 0; m < M; m++) {
+        if (audio_out && audio_out[m]) {
+            ggml_backend_tensor_get(tail->out, audio_out[m], (size_t) m * lane_samples * sizeof(float),
+                                    lane_samples * sizeof(float));
+        }
+        pc->stream_pos[(size_t) (set0 + m)] += T;
+    }
+    return true;
 }
 
 bool pipeline_codec_decode_stream(PipelineCodec * pc, const int32_t * codes, int T, float * audio_out) {

@@ -105,32 +105,154 @@ static void parse_generation_defaults(const GGUFModel & gf, GenerationDefaults &
     g.max_new_tokens        = (int) gf_get_u32(gf, "generation.max_new_tokens");
 }
 
-// Ensure the static predictor graph set for batch width N exists:
-// prefill (T=2 through lm_head[0]) plus one T=1 step per acoustic
-// codebook after the first. Built lazily on the first frame at a given
-// width, then replayed for the process lifetime.
-static bool pipeline_tts_cp_graphs_ensure(PipelineTTS * pt, int N) {
+// Build the fused frame graph for the single slot mode: the unrolled
+// predictor passes followed by the codec stream tail at T=1 over lane
+// set 0, one cgraph, one compute per frame. The codec reads the codes
+// straight from the sampler accumulator through a device view, so the
+// codes never round trip the host between the predictor and the
+// decode. Requires the codec stream state (reset at slot admit) to be
+// allocated, which holds by the time the first frame builds this.
+static bool pipeline_tts_fused_graph_build(PipelineTTS * pt, CodePredGraphSet & s) {
+    const CodePredictorWeights * cw = &pt->code_predictor;
+    KVCache *                    kv = &pt->code_predictor_kv;
+
+    const int n_layers   = cw->num_hidden_layers;
+    const int n_acoustic = cw->num_acoustic_codebooks;
+    const int n_codes    = n_acoustic + 1;
+    const int max_nodes  = code_predictor_frame_graph_max_nodes(n_layers, n_acoustic) + 4096;
+
+    if (n_codes != TOKENIZER_NUM_CODEBOOKS) {
+        qt_log(QT_LOG_ERROR, "[Pipeline] fused tail codebook mismatch: %d vs %d", n_codes, TOKENIZER_NUM_CODEBOOKS);
+        return false;
+    }
+
+    CodePredGraph * cp = &s.fused;
+
+    const size_t bytes =
+        ggml_tensor_overhead() * (size_t) max_nodes + ggml_graph_overhead_custom((size_t) max_nodes, false);
+    struct ggml_init_params gp = { bytes, NULL, true };
+    cp->ctx                    = ggml_init(gp);
+    if (!cp->ctx) {
+        qt_log(QT_LOG_ERROR, "[Pipeline] fused graph ctx allocation failed");
+        return false;
+    }
+    struct ggml_cgraph * gf = ggml_new_graph_custom(cp->ctx, max_nodes, false);
+
+    std::vector<CodePredPassBake> bake;
+    bake.reserve((size_t) n_acoustic);
+    struct ggml_tensor * logits = NULL;
+
+    code_predictor_pass_append(cp->ctx, gf, cw, kv, pt->talker.codec_embedding, pt->hidden_bridge, &s.sampler, 0, 1,
+                               pt->use_flash_attn, pt->clamp_fp16, &logits, bake);
+    for (int g = 1; g < n_acoustic; g++) {
+        code_predictor_pass_append(cp->ctx, gf, cw, kv, cw->codec_embedding[(size_t) (g - 1)], NULL, &s.sampler, g, 1,
+                                   pt->use_flash_attn, pt->clamp_fp16, &logits, bake);
+    }
+
+    // Codes bridge: the [1, 16] accumulator is 16 contiguous i32, c0
+    // first, exactly the [T=1, K=16, M=1] layout the quantizer reads.
+    struct ggml_tensor * codes_in = ggml_view_3d(cp->ctx, s.sampler.codes, 1, n_codes, 1, s.sampler.codes->nb[1],
+                                                 (size_t) n_codes * s.sampler.codes->nb[1], 0);
+    ggml_set_name(codes_in, "fused_codes_bridge");
+
+    if (!pipeline_codec_stream_tail_append(&pt->codec, cp->ctx, gf, codes_in, 1, 1, &s.tail)) {
+        code_predictor_graph_free(cp);
+        s.tail = {};
+        return false;
+    }
+
+    cp->galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(pt->backend));
+    if (!cp->galloc || !ggml_gallocr_alloc_graph(cp->galloc, gf)) {
+        qt_log(QT_LOG_ERROR, "[Pipeline] fused graph allocation failed");
+        code_predictor_graph_free(cp);
+        s.tail = {};
+        return false;
+    }
+    code_predictor_bake_upload(bake, 1, kv->max_seq_len);
+
+    cp->gf     = gf;
+    cp->logits = logits;
+    cp->N      = 1;
+    return true;
+}
+
+// Run one fused frame for the single slot: sampler upload, codec ring
+// upload, one compute, codes readback, then audio readback with the
+// lane position advance. Mirrors code_predictor_frame_step for N=1
+// plus the codec side of the graph.
+static bool pipeline_tts_fused_frame_step(PipelineTTS *         pt,
+                                          CodePredGraphSet &    gs,
+                                          const int32_t *       c0,
+                                          const float *         temperature,
+                                          const int64_t *       seed,
+                                          const int64_t *       subseq_base,
+                                          float *               audio,
+                                          CodePredictorOutput * out) {
+    SamplerInputs * sp      = &gs.sampler;
+    const int       n_codes = pt->num_code_groups;
+
+    ggml_backend_tensor_set(sp->codes, c0, 0, sizeof(int32_t));
+    sampler_inputs_upload(sp, temperature, seed, subseq_base, 1);
+    if (!pipeline_codec_stream_tail_upload(&pt->codec, &gs.tail, 0)) {
+        return false;
+    }
+
+    if (ggml_backend_graph_compute(pt->backend, gs.fused.gf) != GGML_STATUS_SUCCESS) {
+        qt_log(QT_LOG_ERROR, "[Pipeline] fused frame graph compute failed");
+        return false;
+    }
+
+    // N=1: the accumulator rows are single scalars, so the slot major
+    // output equals the row major readback.
+    out->codes.resize((size_t) n_codes);
+    ggml_backend_tensor_get(sp->codes, out->codes.data(), 0, (size_t) n_codes * sizeof(int32_t));
+
+    float * outs[1] = { audio };
+    return pipeline_codec_stream_tail_read(&pt->codec, &gs.tail, 0, outs);
+}
+
+// Ensure the static predictor graph set for batch width N exists: the
+// frame graph, or its fused flavor carrying the codec stream tail,
+// over one persistent sampler state. Built lazily on the first frame
+// at a given width, then replayed for the process lifetime.
+static bool pipeline_tts_cp_graphs_ensure(PipelineTTS * pt, int N, bool fused) {
     if ((int) pt->cp_graphs.size() < N) {
         pt->cp_graphs.resize((size_t) N);
     }
     CodePredGraphSet & s = pt->cp_graphs[(size_t) (N - 1)];
-    if (s.prefill.ctx) {
+    if (fused ? s.fused.ctx != NULL : s.frame.ctx != NULL) {
         return true;
     }
-    if (!code_predictor_graph_build(&pt->code_predictor, &pt->code_predictor_kv, pt->backend,
-                                    pt->talker.codec_embedding, pt->hidden_bridge, 0, N, pt->use_flash_attn,
-                                    pt->clamp_fp16, &s.prefill)) {
-        return false;
-    }
-    s.steps.resize((size_t) (pt->num_code_groups - 2));
-    for (size_t g = 0; g < s.steps.size(); g++) {
-        if (!code_predictor_graph_build(&pt->code_predictor, &pt->code_predictor_kv, pt->backend,
-                                        pt->code_predictor.codec_embedding[g], NULL, (int) g + 1, N, pt->use_flash_attn,
-                                        pt->clamp_fp16, &s.steps[g])) {
+
+    // Sampler inputs and the codes accumulator, resident on the
+    // backend for the process lifetime: every graph of the set views
+    // them, so they allocate before any graph builds.
+    const int n_steps = pt->num_code_groups - 1;
+    if (!s.sampler_ctx) {
+        struct ggml_init_params gp = { ggml_tensor_overhead() * 8, NULL, true };
+        s.sampler_ctx              = ggml_init(gp);
+        if (s.sampler_ctx) {
+            sampler_inputs_build(s.sampler_ctx, &s.sampler, N, n_steps, pt->gen_defaults.subtalker_top_k);
+            s.sampler_buf = ggml_backend_alloc_ctx_tensors(s.sampler_ctx, pt->backend);
+        }
+        if (!s.sampler_ctx || !s.sampler_buf) {
+            qt_log(QT_LOG_ERROR, "[Pipeline] sampler state allocation failed (N=%d)", N);
+            if (s.sampler_ctx) {
+                ggml_free(s.sampler_ctx);
+                s.sampler_ctx = NULL;
+            }
             return false;
         }
+        ggml_backend_buffer_clear(s.sampler_buf, 0);
     }
-    return true;
+
+    if (fused) {
+        return pipeline_tts_fused_graph_build(pt, s);
+    }
+
+    return code_predictor_frame_graph_build(&pt->code_predictor, &pt->code_predictor_kv, pt->backend,
+                                            pt->talker.codec_embedding, pt->hidden_bridge, &s.sampler, N,
+                                            pt->use_flash_attn, pt->clamp_fp16, &s.frame);
 }
 
 bool pipeline_tts_load(PipelineTTS * pt,
@@ -140,7 +262,8 @@ bool pipeline_tts_load(PipelineTTS * pt,
                        bool          use_fa,
                        bool          clamp_fp16,
                        int           max_batch,
-                       float         codec_chunk_sec) {
+                       float         codec_chunk_sec,
+                       bool          codec_fused) {
     pt->bp                  = bp;
     pt->backend             = bp.backend;
     pt->sched               = NULL;
@@ -160,6 +283,10 @@ bool pipeline_tts_load(PipelineTTS * pt,
     // FP16 overflow guard on sub Ampere CUDA tensor cores.
     pt->use_flash_attn = use_fa && bp.has_gpu;
     pt->clamp_fp16     = clamp_fp16;
+
+    // Fused codec tail: the frame graph decodes its own audio chunk,
+    // single slot latency mode, effective at max_batch 1 only.
+    pt->codec_fused = codec_fused && pt->max_batch == 1;
 
     if (!gf_load(&pt->gguf_talker, talker_gguf_path)) {
         qt_log(QT_LOG_ERROR, "[Pipeline] failed to load talker GGUF: %s", talker_gguf_path);
@@ -221,7 +348,7 @@ bool pipeline_tts_load(PipelineTTS * pt,
     // one buys nothing and redecodes frames for nothing.
     pt->codec_left_ctx_frames = 2 * pt->codec.transformer.sliding_window;
 
-    // Scheduler shared by talker_forward_* and code_predictor_step.
+    // Scheduler shared by talker_forward_* and the predictor frame step.
     // Routes ops the GPU backend cannot run (typical case: K-quant
     // get_rows on CUDA) to the CPU backend. 4096 nodes covers the 28L
     // Qwen3 talker graph (~48 ops per layer with KV cache writes) with
@@ -317,13 +444,10 @@ bool pipeline_tts_load(PipelineTTS * pt,
     // on first use.
     pt->talker_decode_graphs.resize(((size_t) pt->talker_kv.max_seq_len + 255) / 256);
     bool graphs_ok = graph_arena_init(&pt->talker_arena, talker_graph_max_nodes(pt->talker.num_hidden_layers)) &&
-                     pipeline_tts_cp_graphs_ensure(pt, 1);
+                     pipeline_tts_cp_graphs_ensure(pt, 1, false);
     if (!graphs_ok) {
         for (size_t n = 0; n < pt->cp_graphs.size(); n++) {
-            code_predictor_graph_free(&pt->cp_graphs[n].prefill);
-            for (size_t g = 0; g < pt->cp_graphs[n].steps.size(); g++) {
-                code_predictor_graph_free(&pt->cp_graphs[n].steps[g]);
-            }
+            code_predictor_graph_set_free(&pt->cp_graphs[n]);
         }
         pt->cp_graphs.clear();
         pt->talker_decode_graphs.clear();
@@ -355,10 +479,7 @@ bool pipeline_tts_load(PipelineTTS * pt,
 
 void pipeline_tts_free(PipelineTTS * pt) {
     for (size_t n = 0; n < pt->cp_graphs.size(); n++) {
-        code_predictor_graph_free(&pt->cp_graphs[n].prefill);
-        for (size_t g = 0; g < pt->cp_graphs[n].steps.size(); g++) {
-            code_predictor_graph_free(&pt->cp_graphs[n].steps[g]);
-        }
+        code_predictor_graph_set_free(&pt->cp_graphs[n]);
     }
     pt->cp_graphs.clear();
     for (size_t g = 0; g < pt->talker_decode_graphs.size(); g++) {
@@ -1204,9 +1325,17 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
     for (int i = 0; i < N; i++) {
         any_live = any_live || e->slots[(size_t) i].has_frame;
     }
+    bool fused_frame = false;
     if (any_live) {
         CodePredictorOutput cp;
-        if (!pipeline_tts_cp_graphs_ensure(pt, N)) {
+        std::vector<float>  fused_audio;
+
+        // Fused single slot mode: predictor and codec run in one graph,
+        // gated on the slot actually streaming (codec_set 0 reset at
+        // admit) so the stream state and the audio consumer both exist.
+        fused_frame = pt->codec_fused && N == 1 && e->slots[0].has_frame && e->slots[0].codec_set == 0;
+
+        if (!pipeline_tts_cp_graphs_ensure(pt, N, fused_frame)) {
             qt_set_error("pipeline_tts_synthesize: code predictor graph build failed (N=%d)", N);
             for (TtsSlot & s : e->slots) {
                 s.finished   = true;
@@ -1217,8 +1346,6 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
             CodePredGraphSet &   gs = pt->cp_graphs[(size_t) (N - 1)];
             std::vector<int32_t> c0s((size_t) N, 0);
             std::vector<float>   temps((size_t) N, 0.0f);
-            std::vector<int>     top_ks((size_t) N, 0);
-            std::vector<float>   top_ps((size_t) N, 1.0f);
             std::vector<int64_t> seeds((size_t) N, 0);
             std::vector<int64_t> subseqs((size_t) N, 0);
             const char *         cp_dump = NULL;
@@ -1230,8 +1357,6 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
                 const struct qt_tts_params * p = s.job->params;
                 c0s[(size_t) i]                = s.pending_c0;
                 temps[(size_t) i]              = s.subtk_T;
-                top_ks[(size_t) i]             = p->subtalker_top_k;
-                top_ps[(size_t) i]             = p->subtalker_top_p;
                 seeds[(size_t) i]              = s.job->resolved_seed;
                 subseqs[(size_t) i]            = s.subseq_counter - 1;
                 if (N == 1 && s.step == 0 && p->dump_dir) {
@@ -1239,9 +1364,17 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
                 }
             }
             Timer t_pred;
-            if (!code_predictor_step(&pt->code_predictor, pt->backend, &gs.prefill, gs.steps.data(), c0s.data(), N,
-                                     temps.data(), top_ks.data(), top_ps.data(), seeds.data(), subseqs.data(), cp_dump,
-                                     &cp)) {
+            bool  pred_ok;
+            if (fused_frame) {
+                fused_audio.resize((size_t) TOKENIZER_HOP_LENGTH);
+                pred_ok = pipeline_tts_fused_frame_step(pt, gs, c0s.data(), temps.data(), seeds.data(), subseqs.data(),
+                                                        fused_audio.data(), &cp);
+            } else {
+                pred_ok =
+                    code_predictor_frame_step(&pt->code_predictor, pt->backend, &gs.frame, &gs.sampler, c0s.data(), N,
+                                              temps.data(), seeds.data(), subseqs.data(), cp_dump, &cp);
+            }
+            if (!pred_ok) {
                 for (TtsSlot & s : e->slots) {
                     s.finished   = true;
                     s.fin_status = QT_STATUS_GENERATE_FAILED;
@@ -1270,6 +1403,17 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
                                                cp.codes.begin() + (size_t) (i + 1) * (size_t) num_codebooks);
                     s.all_codes.push_back(codes);
                     s.talker_history.push_back(s.pending_c0);
+
+                    // Fused mode: this frame's audio came out of the
+                    // same compute, dispatch it now instead of staging
+                    // through the shared codec flush below.
+                    if (fused_frame && p->on_chunk && s.fin_status != QT_STATUS_CANCELLED) {
+                        if (!p->on_chunk(fused_audio.data(), TOKENIZER_HOP_LENGTH, p->on_chunk_user_data)) {
+                            qt_log(QT_LOG_INFO, "[Pipeline] on_chunk callback aborted the synthesis (fused)");
+                            s.finished   = true;
+                            s.fin_status = QT_STATUS_CANCELLED;
+                        }
+                    }
 
                     // Streaming slots stage this frame through
                     // all_codes.back() and has_frame; the shared codec
@@ -1344,7 +1488,7 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
     // every retiring lane leaves with its audio fully dispatched before
     // the swap remove below. Zero rows only ever exist in that single
     // row flush, which keeps the per lane audio blocks free of padding.
-    if (e->codec_M > 0) {
+    if (e->codec_M > 0 && !fused_frame) {
         const int num_cg     = pt->num_code_groups;
         bool      any_finish = false;
         bool      any_stage  = false;

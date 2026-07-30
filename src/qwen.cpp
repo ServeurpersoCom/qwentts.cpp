@@ -225,6 +225,7 @@ void qt_init_default_params(struct qt_init_params * p) {
     p->max_batch   = 1;
 
     p->codec_chunk_sec = QT_CODEC_CHUNK_SEC_DEFAULT;
+    p->codec_fused     = false;
 }
 
 void qt_tts_default_params(struct qt_tts_params * p) {
@@ -362,7 +363,7 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
         }
 
         if (!pipeline_tts_load(&q->pt, params->talker_path, params->codec_path, q->bp, params->use_fa,
-                               params->clamp_fp16, max_batch, chunk_sec)) {
+                               params->clamp_fp16, max_batch, chunk_sec, params->codec_fused)) {
             qt_throw("qt_init: pipeline_tts_load failed for '%s' / '%s'", params->talker_path, params->codec_path);
         }
 
