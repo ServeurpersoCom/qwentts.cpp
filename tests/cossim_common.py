@@ -396,3 +396,35 @@ GEN_KWARGS_GREEDY = dict(
     subtalker_dosample    = False,
     repetition_penalty    = 1.0,
 )
+
+
+def fused_pass(cmd, text, dump_cpp):
+    """Re-run the C++ side with --codec-fused (streaming, wav on stdout)
+    and gate on codes equality against the buffered run: the decode path
+    cannot change the predictor, so codes-full.bin must match exactly.
+    The fused audio itself is not scored here, greedy amplitudes vanish
+    in the streamed PCM_16 and the fused FP envelope has its own
+    validation against the stream path."""
+    import subprocess
+
+    dump_fused = dump_cpp + "-fused"
+    os.makedirs(dump_fused, exist_ok=True)
+
+    cmd_f = list(cmd)
+    cmd_f[cmd_f.index("--dump") + 1] = dump_fused
+    cmd_f[cmd_f.index("-o") + 1]     = "-"
+    cmd_f.append("--codec-fused")
+
+    print(f"[GGML] Cmd: {' '.join(cmd_f)}")
+    r = subprocess.run(cmd_f, input=text.encode(), capture_output=True)
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr.decode(errors="replace"))
+        sys.exit(r.returncode)
+
+    # surface the fused run's perf lines next to the buffered ones
+    # already in the log, so every grid cell carries the comparison
+    for line in r.stderr.decode(errors="replace").splitlines():
+        if "[Perf]" in line:
+            print(line.replace("[Perf]", "[Perf Fused]"))
+
+    compare_exact_i32("codes-full.bin", dump_fused, dump_cpp, "CodesFullFused")
