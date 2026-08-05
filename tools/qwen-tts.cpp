@@ -54,7 +54,6 @@ static void print_usage(const char * prog) {
             "  --ref-text <path>       Transcript file for the reference (enables ICL clone mode)\n"
             "  --max-new <n>           Max new audio frames (default: 2048)\n"
             "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 24.0)\n"
-            "  --codec-fused           Decode each frame's audio inside the predictor graph (streaming only)\n"
             "  --stream-by-line        Flush synthesis at each newline, one WAV header per line (-o '-')\n\n"
             "Sampling:\n"
             "  --seed <int>            Sampling seed (default: -1 for random)\n"
@@ -101,7 +100,6 @@ struct Args {
     bool         clamp_fp16;
     bool         stream_by_line;
     float        codec_chunk_sec;
-    bool         codec_fused;
 };
 
 // Read all of stdin into a string. Binary mode on Windows so UTF-16 input
@@ -200,7 +198,6 @@ static bool parse_args(int argc, char ** argv, Args & a) {
     // Chunk sentinel : qt_init resolves a non positive value to the
     // library default.
     a.codec_chunk_sec       = 0.0f;
-    a.codec_fused           = false;
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
         if (std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--help") == 0) {
@@ -260,8 +257,6 @@ static bool parse_args(int argc, char ** argv, Args & a) {
             a.clamp_fp16 = true;
         } else if (std::strcmp(arg, "--stream-by-line") == 0) {
             a.stream_by_line = true;
-        } else if (std::strcmp(arg, "--codec-fused") == 0) {
-            a.codec_fused = true;
         } else if (std::strcmp(arg, "--codec-chunk-dur") == 0 && i + 1 < argc) {
             a.codec_chunk_sec = (float) std::atof(argv[++i]);
         } else if (std::strcmp(arg, "-o") == 0 && i + 1 < argc) {
@@ -286,7 +281,6 @@ static int run(const Args & a) {
     iparams.use_fa          = a.use_fa;
     iparams.clamp_fp16      = a.clamp_fp16;
     iparams.codec_chunk_sec = a.codec_chunk_sec;
-    iparams.codec_fused     = a.codec_fused;
 
     qt_context * q = qt_init(&iparams);
     if (!q) {

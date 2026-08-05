@@ -155,7 +155,6 @@ def main():
     n = min(aa.size, ab.size)
     print(f"[Cossim] WAV stft_cos: {cc.stft_cos(aa.ravel()[:n], ab.ravel()[:n]):.6f} samples: {n}")
 
-    cc.fused_pass(cmd, text, DUMP_CPP)
 
 if __name__ == "__main__":
     main()

@@ -194,36 +194,6 @@ bool pipeline_codec_stream_reset(PipelineCodec * pc, int set);
 // NULL discards that lane's audio. Every lane's position advances.
 bool pipeline_codec_decode_stream_batch(PipelineCodec * pc, const int32_t * codes, int T, int M, float ** audio_out);
 
-// Fused streaming tail: the decode chain appended to a caller owned
-// graph, codes read in graph from a caller provided [T, K, M] i32
-// tensor instead of a host upload. The caller allocates the graph,
-// uploads the per frame ring inputs with
-// pipeline_codec_stream_tail_upload before each compute, and reads the
-// audio and advances the lane positions with
-// pipeline_codec_stream_tail_read after it. Lanes bind the state sets
-// [set0, set0 + M).
-struct CodecStreamTail {
-    struct ggml_tensor * pos  = nullptr;  // [T * M] i32
-    struct ggml_tensor * rows = nullptr;  // [T, 1, M] i64
-    struct ggml_tensor * mask = nullptr;  // [ring, T, 1, M] f32
-    struct ggml_tensor * out  = nullptr;  // [T * 1920, 1, M] f32
-    int                  T    = 0;
-    int                  M    = 0;
-    std::vector<int32_t> pos_buf;
-    std::vector<int64_t> rows_buf;
-    std::vector<float>   mask_buf;
-};
-
-bool pipeline_codec_stream_tail_append(PipelineCodec *       pc,
-                                       struct ggml_context * gctx,
-                                       struct ggml_cgraph *  gf,
-                                       struct ggml_tensor *  codes_in,
-                                       int                   T,
-                                       int                   M,
-                                       CodecStreamTail *     tail);
-bool pipeline_codec_stream_tail_upload(PipelineCodec * pc, CodecStreamTail * tail, int set0);
-bool pipeline_codec_stream_tail_read(PipelineCodec * pc, CodecStreamTail * tail, int set0, float ** audio_out);
-
 // Decode one chunk of T frames through the STAGING set (the last
 // one). codes is [T, K]; audio_out receives T * TOKENIZER_HOP_LENGTH
 // samples, NULL discards the audio (ICL reference priming). The
