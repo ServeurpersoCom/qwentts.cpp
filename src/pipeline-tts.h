@@ -11,13 +11,17 @@
 // directly so the facade in qwen.cpp stays a thin wrapper.
 
 #include "backend.h"
+#include "code-predictor-graph.h"
 #include "code-predictor-weights.h"
 #include "ggml-backend.h"
 #include "gguf-weights.h"
+#include "graph-arena.h"
 #include "kv-cache.h"
 #include "pipeline-codec.h"
 #include "qwen.h"
+#include "sampling-graph.h"
 #include "speaker-encoder-weights.h"
+#include "talker-decode-graph.h"
 #include "talker-weights.h"
 
 #include <cstdint>
@@ -87,6 +91,32 @@ struct PromptCache {
     size_t                              max_prefix_entries;
 };
 
+// One set of static predictor graphs for a given batch width: the
+// frame graph replays the prefill and every acoustic step in one
+// compute. The sampler inputs and the codes accumulator live in their
+// own context backed by a persistent backend buffer: every graph of
+// the set reads and writes them across replays, so they never enter
+// gallocr pools.
+struct CodePredGraphSet {
+    CodePredGraph         frame;  // prefill and every acoustic step in one cgraph
+    SamplerInputs         sampler;
+    struct ggml_context * sampler_ctx = nullptr;
+    ggml_backend_buffer_t sampler_buf = nullptr;
+};
+
+static inline void code_predictor_graph_set_free(CodePredGraphSet * s) {
+    code_predictor_graph_free(&s->frame);
+    if (s->sampler_buf) {
+        ggml_backend_buffer_free(s->sampler_buf);
+        s->sampler_buf = nullptr;
+    }
+    if (s->sampler_ctx) {
+        ggml_free(s->sampler_ctx);
+        s->sampler_ctx = nullptr;
+    }
+    s->sampler = SamplerInputs();
+}
+
 struct PipelineTTS {
     GGUFModel             gguf_talker;
     TalkerWeights         talker;
@@ -94,12 +124,28 @@ struct PipelineTTS {
     SpeakerEncoderWeights speaker_encoder;
     bool                  has_speaker_encoder;
 
+    // Speaker encoder weights residency: loaded lazily on the first
+    // reference audio request, see pipeline-tts.cpp.
+    bool spk_enc_loaded;
+
     PipelineCodec codec;
 
     std::string tokenizer_type;
     std::string model_size;
     std::string model_type;
     int         num_code_groups;
+
+    // Batch capacity: number of KV sets, bridge columns and maximum
+    // concurrent slots the batch engine drives. 1 keeps the exact
+    // single sequence layout and behavior.
+    int max_batch;
+
+    // Codec decode framing of the buffered path, in 12.5 Hz frames.
+    // chunk sizes the decode window and comes from the caller; left_ctx
+    // is the warmup the decoder needs and derives from its own sliding
+    // window at load.
+    int codec_chunk_frames;
+    int codec_left_ctx_frames;
 
     CodecSpecials              codec_specials;
     TextSpecials               text_specials;
@@ -121,24 +167,50 @@ struct PipelineTTS {
     bool use_flash_attn;
     bool clamp_fp16;
 
-    // Persistent KV caches: the talker holds the LM context, the
-    // predictor holds one frame's 16 sub-steps and gets reset every
-    // frame in code_predictor_step.
+    // Persistent KV caches, one set per slot: the talker holds the LM
+    // contexts, the predictor holds one frame's 16 sub-steps per slot,
+    // rewritten every frame at baked rows.
     KVCache talker_kv;
     KVCache code_predictor_kv;
+
+    // Hidden bridge: the talker last position hidden of every slot
+    // stays resident on device as one column of [talker_hidden,
+    // max_batch] f32. The talker graphs copy their columns in, the code
+    // predictor prefill graph reads them as a leaf, so the AR hot loop
+    // never round trips the rows through the host.
+    struct ggml_context * bridge_ctx;
+    ggml_backend_buffer_t bridge_buf;
+    struct ggml_tensor *  hidden_bridge;
+
+    // Persistent graph arena for the talker prefill (T_ctx varies per
+    // request, rebuilt through the sched). The talker decode and the
+    // whole predictor run on static batched graphs instead: the decode
+    // keeps one graph per attention window class built lazily and
+    // rebuilt when the batch width changes, the predictor one graph
+    // set (prefill T=2 plus one per acoustic step) per batch width
+    // built lazily, all replayed directly on the backend.
+    GraphArena                     talker_arena;
+    std::vector<TalkerDecodeGraph> talker_decode_graphs;  // one per 256 step window class, lazy
+    std::vector<CodePredGraphSet>  cp_graphs;             // index N - 1, lazy per batch width
 };
 
 // Open the talker GGUF and the codec GGUF, load every module on the
 // shared backend. Aborts with a logged error on any missing tensor or
 // invalid metadata. use_fa is gated on bp.has_gpu inside the load:
 // CPU only runs always use the manual F32 attention chain. clamp_fp16
-// is forwarded as is. Caller frees with pipeline_tts_free.
+// is forwarded as is. max_batch sizes the KV sets, the bridge columns
+// and the maximum concurrent slots (minimum 1). codec_chunk_sec
+// converts to the chunk width every buffered decode on this handle
+// runs with; the left context that pairs with it derives from the
+// codec's own sliding window. Caller frees with pipeline_tts_free.
 bool pipeline_tts_load(PipelineTTS * pt,
                        const char *  talker_gguf_path,
                        const char *  codec_gguf_path,
                        BackendPair   bp,
                        bool          use_fa,
-                       bool          clamp_fp16);
+                       bool          clamp_fp16,
+                       int           max_batch,
+                       float         codec_chunk_sec);
 
 void pipeline_tts_free(PipelineTTS * pt);
 
@@ -175,3 +247,49 @@ qt_status pipeline_tts_synthesize(PipelineTTS *                pt,
 // rate (24000 / TOKENIZER_HOP_LENGTH). Clamps to a
 // minimum of one frame.
 int pipeline_tts_duration_sec_to_tokens(const PipelineTTS * pt, float duration_sec);
+
+// One synthesis request driven by the batch engine. The caller owns
+// params / out for the whole lifetime of the job; status and error
+// fill at retirement. error carries the qt_last_error() text captured
+// on the thread that ran the engine, so a scheduler on a worker thread
+// can replay it into the caller's thread local slot. done is reserved
+// for the owner's completion signaling; the engine never touches it.
+struct TtsJob {
+    const struct qt_tts_params * params;
+    int64_t                      resolved_seed;
+    struct qt_audio *            out;
+    qt_status                    status;
+    std::string                  error;
+    bool                         done;
+};
+
+// Batch engine: drives up to pt->max_batch concurrent synthesis slots
+// in lockstep over the batched talker decode and code predictor
+// graphs. Slots always occupy KV sets [0, N); a retirement compacts
+// the range with one device side set copy so the batched views stay
+// consecutive. Single threaded: every call runs on the thread that
+// owns the GPU. pipeline_tts_synthesize drives a transient engine
+// synchronously for the one request case; the facade scheduler keeps a
+// long lived one on its worker thread.
+struct TtsEngine;
+
+TtsEngine * tts_engine_new(PipelineTTS * pt, BPETokenizer * tok);
+void        tts_engine_free(TtsEngine * e);
+
+// Admit one job: prompt assembly, reference handling and talker
+// prefill into the next free slot (KV set N). Returns false when the
+// admit fails; job->status and job->error are then final and the job
+// never occupies a slot. Logs the prefill stall the join imposes on
+// the already active slots.
+bool tts_engine_admit(TtsEngine * e, TtsJob * job);
+
+// Run one frame for every active slot: batched talker decode for the
+// slots past their prefill, per slot c0 sampling, batched code
+// predictor, per slot codec streaming, then retirement of finished
+// slots (EOS, max_new_tokens, cancel, error) including their buffered
+// codec decode or streaming drain. Retired jobs append to *retired
+// with status, error and out final.
+void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired);
+
+// Number of currently occupied slots.
+int tts_engine_active(const TtsEngine * e);

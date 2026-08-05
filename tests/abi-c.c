@@ -68,10 +68,13 @@ int main(void) {
     qt_tts_default_params(&params);
 
     /* Sanity-check a few default values, including the abi_version and
-     * the new use_fa / clamp_fp16 / on_chunk / codec_chunk_sec /
-     * codec_left_context_sec slots. */
-    if (params.max_new_tokens != 2048 || params.codec_chunk_sec <= 0.0f || params.codec_left_context_sec < 0.0f) {
+     * the use_fa / clamp_fp16 / on_chunk / codec framing slots. */
+    if (params.max_new_tokens != 2048) {
         fprintf(stderr, "[Probe] default values do not match\n");
+        return 1;
+    }
+    if (iparams.codec_chunk_sec <= 0.0f || iparams.max_batch != 1) {
+        fprintf(stderr, "[Probe] init_params chunk / max_batch defaults do not match\n");
         return 1;
     }
     if (iparams.abi_version != QT_ABI_VERSION || params.abi_version != QT_ABI_VERSION) {
@@ -93,6 +96,9 @@ int main(void) {
 
     struct qt_audio audio = { 0 };
     qt_audio_free(&audio);
+
+    struct qt_voice_ref voice_ref = { 0 };
+    qt_voice_ref_free(&voice_ref);
 
     /* Install the log callback before the failing init so the [Qwen]
      * ERROR line lands on stub_log instead of stderr. */
@@ -136,13 +142,36 @@ int main(void) {
      * rejected up front, before any allocation. */
     struct qt_init_params future_iparams;
     qt_init_default_params(&future_iparams);
-    future_iparams.talker_path = "irrelevant.gguf";
-    future_iparams.codec_path  = "irrelevant.gguf";
-    future_iparams.abi_version = QT_ABI_VERSION + 1;
+    future_iparams.talker_path   = "irrelevant.gguf";
+    future_iparams.codec_path    = "irrelevant.gguf";
+    future_iparams.abi_version   = QT_ABI_VERSION + 1;
     struct qt_context * rejected = qt_init(&future_iparams);
     if (rejected != NULL) {
         fprintf(stderr, "[Probe] qt_init accepted a future abi_version\n");
         qt_free(rejected);
+        return 8;
+    }
+    /* The paths point at a file that does not exist, so a NULL return
+     * alone does not prove the ABI gate fired : the error string must
+     * name the range check, not a failed GGUF open. */
+    if (strstr(qt_last_error(), "supported range") == NULL) {
+        fprintf(stderr, "[Probe] future abi_version rejection did not come from the range check: '%s'\n",
+                qt_last_error());
+        return 8;
+    }
+
+    /* The floor is the other half of the range check : a struct laid out
+     * by a pre-QT_ABI_MIN_VERSION header must be rejected just as hard. */
+    future_iparams.abi_version = QT_ABI_MIN_VERSION - 1;
+    rejected                   = qt_init(&future_iparams);
+    if (rejected != NULL) {
+        fprintf(stderr, "[Probe] qt_init accepted an abi_version below the floor\n");
+        qt_free(rejected);
+        return 8;
+    }
+    if (strstr(qt_last_error(), "supported range") == NULL) {
+        fprintf(stderr, "[Probe] floor abi_version rejection did not come from the range check: '%s'\n",
+                qt_last_error());
         return 8;
     }
 
@@ -151,6 +180,13 @@ int main(void) {
         fprintf(stderr, "[Probe] qt_synthesize(NULL) returned %d, expected %d\n", (int) rc,
                 (int) QT_STATUS_INVALID_PARAMS);
         return 3;
+    }
+
+    rc = qt_extract_voice_ref(NULL, NULL, 0, &voice_ref);
+    if (rc != QT_STATUS_INVALID_PARAMS) {
+        fprintf(stderr, "[Probe] qt_extract_voice_ref(NULL) returned %d, expected %d\n", (int) rc,
+                (int) QT_STATUS_INVALID_PARAMS);
+        return 11;
     }
 
     int frames = qt_duration_sec_to_tokens(NULL, 1.0f);
@@ -177,6 +213,7 @@ int main(void) {
 
     qt_free(NULL);
     qt_audio_free(&audio);
+    qt_voice_ref_free(&voice_ref);
 
     return 0;
 }

@@ -317,17 +317,61 @@ graph multiplies plain F32 buffers. The whole DAC pipeline runs T-first
 (`ne[0] = T`, `ne[1] = C`) so the fused SNAKE op and `ggml_conv_1d`
 share one layout.
 
-### Chunked decode
+### Chunked decode (buffered path)
 
 A standalone codec decode of an isolated window shows edge artefacts at
 the chunk boundary, because the causal conv kernels and the sliding
 window attention have no left context. `codec_chunked_decode` prepends
-`codec_left_context_sec` worth of previously decoded frames, decodes,
-then strips the samples that belong to the left context. Defaults match
-the upstream tokenizer : `codec_chunk_sec` 24.0 (300 frames at 12.5 Hz)
-and `codec_left_context_sec` 2.0 (25 frames). The first chunk collapses
-its left context to whatever is available. The same routine serves both
-the buffered one-shot decode and the streaming chunk-by-chunk emission.
+`left_ctx_frames` worth of previously decoded frames, decodes, then
+strips the samples that belong to the left context. The chunk width
+comes from `qt_init_params.codec_chunk_sec` (default 24.0, 300 frames at
+12.5 Hz) and resolves to a frame count once at `qt_init`. The left
+context is not a caller knob : it derives from the decoder's own sliding
+window, 2 x sliding_window (144 frames on this codec), which is where
+the chunk output reaches the residual floor of the split. A shorter context leaves the decode
+audibly off, a longer one redecodes frames for nothing. The first chunk
+collapses its left context to whatever is available. This routine serves
+the buffered one-shot decode only.
+
+A chunk covering the whole utterance decodes in a single pass and is
+bit exact against `pipeline_codec_decode`. Any split leaves a residual
+around -50 dB that no amount of left context removes, growing slowly
+with the pass count, so the chunk is a memory knob and not a quality
+one.
+
+### Streaming decode (stateful path)
+
+Every module in the decoder is causal, so a stateful decode of one
+frame at a time reproduces the offline full decode exactly, with no
+re-decoded context and no chunk seams. Each stride-1 causal conv keeps
+its left context ((k-1)*d input rows) in a persistent backend tensor
+that the graph concats ahead of the fresh rows and refreshes in graph;
+each DAC transposed conv carries its col2im overlap tail (kernel -
+stride rows, bias free) into the next frame; the decoder transformer
+attends over a 128-slot sliding window KV ring written through
+set_rows, with the ring slot and the absolute RoPE position carried as
+input data. All state clears to zero at reset, which matches the
+offline zero left pads bit for bit.
+
+The whole T=1 frame graph builds and allocates once
+(`pipeline_codec_stream_ensure`, lazy) and computes directly on the
+backend without the scheduler : a frame decode is four input uploads
+(16 codes, position, ring slot, window mask), one graph compute, and a
+1920-sample readback. The constant topology and tensor addresses keep
+the CUDA graph cache in pure replay. ICL cloning primes the state by
+running the full reference codes through the same path with the
+readback skipped, matching the upstream reference-plus-generated
+decode; the transformer receptive field (8 layers x window 72) exceeds
+any reference length, so the full prime is the exact one.
+
+The primed state feeds a per-reference snapshot LRU
+(`CODEC_SNAP_SLOTS`): after a fresh prime the conv contexts, KV ring,
+and position copy device to device into a slot keyed by the FNV-1a
+hash of the reference codes, and a later request with the same
+reference restores the exact state in one pass of tensor copies
+instead of re-decoding every reference frame. Slots allocate lazily
+and evict least recently used, so the priming cost amortizes across
+repeated cloned-voice requests without any registry coupling.
 
 ## Inference pipeline
 
@@ -386,13 +430,19 @@ the model_type, returning `QT_STATUS_INVALID_PARAMS` :
 prefill the Talker on the prompt prefix                      writes T_ctx into talker_kv
 for frame in 0..max_new_tokens-1 :
     poll cancel
-    c0 = sample(codec_head(talker_hidden_last))              codebook 0, top-k/top-p
-    codes[1..15] = code_predictor_step(talker_hidden_last, c0)
+    c0 = sample(codec_head(last logits))                     codebook 0, top-k/top-p
+    codes[1..15] = code_predictor_step(hidden_bridge, c0)    reads the device bridge
     if c0 == codec_eos : break
-    next_emb = codec_embd(codes) summed over 16 groups
-    talker_forward_decode(next_emb)                          appends one position
-emit / accumulate codec decode of the gathered frames
+    streaming : decode the frame through the stateful codec, emit 1920 samples
+    talker_forward_decode(codes, overlay)                    gathers next_emb in graph
+buffered : chunked codec decode of the gathered frames
 ```
+
+The talker's last-position hidden never round-trips through the host on
+the hot path : the talker graph copies it into a persistent device
+tensor (the hidden bridge) that the code predictor prefill reads as a
+graph leaf. The only per-frame host traffic is the code ids and overlay
+row up, and the logits down for sampling.
 
 Sampling matches the HuggingFace `generate()` chain in F32 :
 `repetition_penalty -> temperature -> top_k -> top_p -> softmax ->
@@ -448,19 +498,23 @@ QT_STATUS_CANCELLED       -5
 
 `qt_tts_params` exposes `cancel` (polled at the top of every Talker
 decode step, ~83 ms granularity) and `on_chunk`. With `on_chunk` set,
-synthesis runs in streaming mode : audio emits chunk by chunk and `out`
-stays empty on success. `codec_chunk_sec` / `codec_left_context_sec`
-drive the chunk framing in both buffered and streaming paths.
+synthesis runs in streaming mode : every generated frame emits its
+1920 samples immediately through the stateful codec and `out` stays
+empty on success. `qt_init_params.codec_chunk_sec` drives the chunk framing of the
+buffered path only; the streaming path ignores it.
 
-`QT_ABI_VERSION` guards struct growth : callers set `abi_version` (or
-let the default-params helpers do it) and the lib rejects a struct laid
-out for a newer header. `qt_version()` returns the git short hash and
-commit date.
+`QT_ABI_VERSION` and `QT_ABI_MIN_VERSION` bound the struct layouts this
+build addresses : callers set `abi_version` (or let the default-params
+helpers do it) and the lib rejects anything outside that closed range,
+a struct laid out for a newer header as well as one whose fields sit at
+offsets this build no longer maps. `qt_version()` returns the git short
+hash and commit date.
 
 ### Low-level API : src/pipeline-tts.h, src/pipeline-codec.h
 
 Direct access to `pipeline_tts_load` / `pipeline_tts_synthesize`,
 `pipeline_codec_encode` / `pipeline_codec_decode`,
+`pipeline_codec_stream_reset` / `pipeline_codec_decode_stream`,
 `codec_chunked_decode`, and the talker / predictor forwards. Used by the
 `qwen-codec` round-trip and the Python cossim harness through dump
 files. C++ types in the signatures, not part of the public ABI.
@@ -504,10 +558,13 @@ Optional:
                           CustomVoice, rejected for Base
   --speaker <name>        Speaker name (CustomVoice only)
   --ref-wav <path>        Reference WAV for voice cloning (Base only)
+  --ref-spk <path>        Pre-extracted speaker embedding from qwen-codec --talker
+                          (replaces --ref-wav, Base only)
+  --ref-rvq <path>        Pre-encoded reference codes from qwen-codec (requires
+                          --ref-spk and --ref-text, enables ICL clone mode)
   --ref-text <path>       Transcript file for the reference (enables ICL clone mode)
   --max-new <n>           Max new audio frames (default: 2048)
   --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 24.0)
-  --codec-left-dur <f>    Codec decode left context duration in seconds (default: 2.0)
   --stream-by-line        Flush synthesis at each newline, one WAV header per line (-o '-')
 
 Sampling:
@@ -532,20 +589,81 @@ Debug:
 Verbatim `--help` :
 
 ```
-Usage: ./build/qwen-codec --model <gguf> [-i <input>] [--format <fmt>]
+Usage: ./build/qwen-codec --model <gguf> [-i <input>] [--talker <gguf>] [--format <fmt>]
 
 Required:
   --model <gguf>          Codec GGUF (qwen-tokenizer-12hz-*.gguf)
 
 Optional:
   -i <path>               Input. WAV -> encode, .rvq -> decode
+  --talker <gguf>         Talker GGUF (Base only). Encode also extracts the speaker
+                          embedding and writes it next to the .rvq as a .spk file
   --format <fmt>          WAV output format: wav16, wav24, wav32 (default: wav16)
 
 Output is auto-named next to input : clip.wav -> clip.rvq, clip.rvq -> clip.wav.
+Encode truncates to the hop boundary, conforming to the qwen-tts --ref-wav path:
+the .rvq feeds qwen-tts --ref-rvq, the .spk feeds qwen-tts --ref-spk.
 When -i is omitted, runs a load self-test of the codec GGUF.
 ```
 
 The `.rvq` container packs the 16 codes per frame at 11 bits LSB-first.
+
+### tts-server
+
+OpenAI-compatible HTTP server over the public ABI, one GPU-resident
+context, synthesis serialized FIFO across connections. The shared HTTP
+core lives in `src/tts-server.h` (also consumed by the sibling *.cpp
+ports); `tools/tts-server.cpp` wires the `qt_*` ABI into it.
+response_format selects the codec path : pcm drives the stateful
+streaming decode frame by frame for lowest latency, wav runs the
+buffered chunked decode (batch codec, talker uninterrupted) for best
+throughput. Verbatim `--help` :
+
+```
+Usage: ./build/tts-server --model <gguf> --codec <gguf> [options]
+
+Required:
+  --model <gguf>          Talker LM GGUF (qwen-talker-*.gguf)
+  --codec <gguf>          Codec GGUF (qwen-tokenizer-*.gguf)
+
+Optional:
+  --alias <name>          Report this model id instead of the GGUF file name
+  --host <ip>             Listen address (default: 127.0.0.1)
+  --port <n>              Listen port (default: 8080)
+  --lang <n>              Language label (default: auto)
+  --no-fa                 Disable flash attention
+  --clamp-fp16            Clamp hidden states to FP16 range
+```
+
+Endpoints :
+
+```
+POST   /v1/audio/speech         OAI text-to-speech; response_format "pcm"
+                                streams s16le 24 kHz mono chunked as it is
+                                generated, "wav" returns a one-shot RIFF file.
+                                Optional sampling overrides ride in the same
+                                body: seed, max_new_tokens, temperature,
+                                top_k, top_p, repetition_penalty. Unset
+                                fields keep the engine defaults, temperature
+                                0 selects greedy decoding, the subtalker
+                                mirrors the talker knobs
+GET    /v1/models               single loaded model, using --alias when set
+GET    /v1/audio/voices         model speakers plus registered cloned voices
+POST   /v1/audio/voices         register a cloned voice: {name, ref_text,
+                                wav_b64} extracts server side through
+                                qt_extract_voice_ref, {name, ref_text,
+                                spk_b64, rvq_b64} takes the pre-extracted
+                                latents verbatim
+DELETE /v1/audio/voices/{name}  drop a registered voice
+GET    /health                  liveness probe
+```
+
+A registered voice wins over a model speaker of the same name and
+injects the reference latents into `qt_tts_params` : `ref_text` present
+selects ICL clone mode, absent selects the x-vector-only mode. The
+registry lives in process RAM and every access shares the synthesis
+mutex, so registration (which runs the extraction on the GPU) and
+lookups never race a running synthesis.
 
 ## Module map
 
@@ -576,20 +694,23 @@ src/
   encoder-downsample.h      25 Hz -> 12.5 Hz downsample conv
   quantizer-encode.h        RVQ encode (16 codebooks, split semantic/acoustic)
   quantizer-decode.h        RVQ decode, per-split output_proj
-  tokenizer-transformer.h   8-layer local-causal decoder transformer (sw 72)
-  convnext-block.h          ConvNeXt upsample stage (2 blocks, 4x)
-  causal-trans-conv.h       Causal ConvTranspose1d via col2im_1d
-  dac-decoder-v2.h          DAC decoder (Descript Audio Codec; strides 8/5/4/3, SnakeBeta)
-  codec-chunked-decode.h    Bounded-VRAM decode with rolling left context
+  tokenizer-transformer.h   8-layer local-causal decoder transformer (sw 72), KV ring stream variant
+  convnext-block.h          ConvNeXt upsample stage (2 blocks, 4x), depthwise stream states
+  causal-trans-conv.h       Causal Conv1d / ConvTranspose1d, offline and stateful stream variants
+  dac-decoder-v2.h          DAC decoder (Descript Audio Codec; strides 8/5/4/3, SnakeBeta), stream states
+  codec-chunked-decode.h    Buffered chunked decode plus the stateful frame-by-frame stream decoder
+  rvq-file.h                Packed .rvq code stream IO, file and buffer readers
 
   prompt-builder.h          Talker prefix assembly, modes, ICL geometry
-  pipeline-codec.{h,cpp}    Audio tokenizer end-to-end
+  pipeline-codec.{h,cpp}    Audio tokenizer end-to-end, persistent stream state, static frame graph
   pipeline-tts.{h,cpp}      Full TTS orchestration, prefill, frame loop, decode
+  tts-server.h              Shared OAI HTTP core : routes, parsing, voice registry hooks
   qwen.{h,cpp}              Public ABI : opaque qt_context, plain C99 header
 
 tools/
   qwen-tts.cpp              CLI : text to WAV
   qwen-codec.cpp            CLI : codes <-> WAV
+  tts-server.cpp            OAI HTTP server : qt_* adapter, cloned voice registry
   quantize.cpp              GGUF requantizer with the codec-aware policy
   version.cmake             Embeds the git short hash into the binary
 

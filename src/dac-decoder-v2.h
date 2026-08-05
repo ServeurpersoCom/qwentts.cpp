@@ -261,3 +261,59 @@ static struct ggml_tensor * dac_decoder_forward(struct ggml_context *  ctx,
     x = qwen_causal_conv1d(ctx, d->conv_post_w, d->conv_post_b, x, 7, 1);
     return x;
 }
+
+// Streaming state for the DAC decoder: one left context per stride 1
+// causal conv ([(k-1)*d, IC] f32 at the conv's own rate) and one
+// overlap carry per transposed conv ([kernel - stride, out_ch] f32,
+// bias free). The k=1 res unit convs are pointwise and stateless.
+struct QwenDACStreamState {
+    struct ggml_tensor * pre;                                // conv_pre k=7, [6, 1024]
+    struct ggml_tensor * carry[DAC_NUM_BLOCKS];              // transconv tails, [stride, out_ch]
+    struct ggml_tensor * ru[DAC_NUM_BLOCKS][DAC_RES_UNITS];  // conv1 k=7 dilated, [6*d, ch]
+    struct ggml_tensor * post;                               // conv_post k=7, [6, 96]
+};
+
+// Streaming residual unit, batched over N lanes: conv1 reads its left
+// context from the persistent state, conv2 is pointwise (k=1, pad
+// free) and runs a direct batched conv.
+static struct ggml_tensor * dac_res_unit_stream(struct ggml_context *  ctx,
+                                                struct ggml_cgraph *   gf,
+                                                const QwenDACResUnit * ru,
+                                                struct ggml_tensor *   x,
+                                                struct ggml_tensor *   state) {
+    struct ggml_tensor * skip = x;
+    x                         = dac_snake(ctx, x, ru->act1);
+    x                         = qwen_causal_conv1d_stream(ctx, gf, ru->c1w, ru->c1b, x, 7, ru->dilation, state);
+    x                         = dac_snake(ctx, x, ru->act2);
+    x                         = ggml_conv_1d(ctx, ru->c2w, x, 1, 0, 1);
+    if (ru->c2b) {
+        struct ggml_tensor * b2d = ggml_reshape_2d(ctx, ru->c2b, 1, ru->c2b->ne[0]);
+        x                        = ggml_add(ctx, x, b2d);
+    }
+    return ggml_add(ctx, skip, x);
+}
+
+// Streaming DAC forward graph: same stack as dac_decoder_forward with
+// every stateful op threaded through the persistent stream state.
+//   x: [T, 1024] f32 T-first
+// returns [T * 1920, 1] f32 T-first, unclamped.
+static struct ggml_tensor * dac_decoder_forward_stream(struct ggml_context *      ctx,
+                                                       struct ggml_cgraph *       gf,
+                                                       const QwenDACDecoder *     d,
+                                                       struct ggml_tensor *       x,
+                                                       const QwenDACStreamState * st) {
+    x = qwen_causal_conv1d_stream(ctx, gf, d->conv_pre_w, d->conv_pre_b, x, 7, 1, st->pre);
+
+    for (int i = 0; i < DAC_NUM_BLOCKS; i++) {
+        const QwenDACBlock & b = d->blk[i];
+        x                      = dac_snake(ctx, x, b.snake1);
+        x = qwen_causal_trans_conv1d_stream(ctx, gf, b.tcw, b.tcb, x, b.stride, b.kernel, b.out_ch, st->carry[i]);
+        for (int r = 0; r < DAC_RES_UNITS; r++) {
+            x = dac_res_unit_stream(ctx, gf, &b.ru[r], x, st->ru[i][r]);
+        }
+    }
+
+    x = dac_snake(ctx, x, d->snake_post);
+    x = qwen_causal_conv1d_stream(ctx, gf, d->conv_post_w, d->conv_post_b, x, 7, 1, st->post);
+    return x;
+}

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Shared helpers for the qwentts.cpp cossim debug scripts.
 
 Provides Philox uniform stream, dump load and save, install_hooks for the
@@ -28,7 +27,7 @@ torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 torch.set_float32_matmul_precision("highest")
 
 # Stub the V1 25Hz tokenizer so qwen_tts.core imports without sox.
-UPSTREAM_ROOT = "/mnt/workspace/Qwen3-TTS"
+UPSTREAM_ROOT = "../../Qwen3-TTS"
 sys.path.insert(0, UPSTREAM_ROOT)
 
 class _StubV1Config:

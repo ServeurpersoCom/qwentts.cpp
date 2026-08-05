@@ -189,3 +189,95 @@ static struct ggml_tensor * upsample_stage_forward(struct ggml_context *     ctx
     }
     return x;
 }
+
+// Streaming state for the upsample stage: one depthwise conv left
+// context per ConvNeXt block, [dwconv_kernel - 1, C] f32 at the block's
+// own rate. The transposed convs have kernel == stride, so they carry
+// nothing and run the offline helper unchanged.
+struct QwenUpsampleStreamState {
+    struct ggml_tensor * dw[UPSAMPLE_MAX_BLOCKS];
+};
+
+// Streaming ConvNeXt block, batched over N lanes: the depthwise causal
+// conv reads its left context from the persistent state instead of a
+// zero pad. Everything else is pointwise and stateless.
+//
+// ggml_conv_1d_dw carries no batch dim, but a depthwise conv treats
+// every channel independently, so the N lanes fold into the channel
+// axis: x_ext [L + T, C, N] reshapes to [L + T, C*N], the kernel tiles
+// N times to [k, 1, C*N] (channel' = c + n*C matches the reshape
+// order), and the [T, C*N] output reshapes back to [T, C, N]. The
+// N == 1 branch keeps the fold free chain.
+static struct ggml_tensor * convnext_block_forward_stream(struct ggml_context *     ctx,
+                                                          struct ggml_cgraph *      gf,
+                                                          const QwenConvNeXtBlock & block,
+                                                          struct ggml_tensor *      x,
+                                                          int                       kernel,
+                                                          struct ggml_tensor *      dw_state) {
+    int C = (int) x->ne[1];
+    int N = (int) x->ne[2];
+
+    struct ggml_tensor * residual = x;
+
+    // dwconv: concat the state ahead of the fresh rows, refresh it with
+    // the tail, run the depthwise conv pad free.
+    struct ggml_tensor * x_ext = ggml_concat(ctx, dw_state, x, 0);  // [k-1 + T, C, N]
+    struct ggml_tensor * tail  = ggml_view_3d(ctx, x_ext, kernel - 1, C, N, x_ext->nb[1], x_ext->nb[2],
+                                              (size_t) (x_ext->ne[0] - (kernel - 1)) * x_ext->nb[0]);
+    ggml_build_forward_expand(gf, ggml_cpy(ctx, tail, dw_state));
+
+    struct ggml_tensor * y;
+    if (N == 1) {
+        y = ggml_conv_1d_dw(ctx, block.dwconv_w, x_ext, 1, 0, 1);  // [T, C, 1]
+    } else {
+        struct ggml_tensor * w_tmpl =
+            ggml_new_tensor_4d(ctx, block.dwconv_w->type, block.dwconv_w->ne[0], block.dwconv_w->ne[1], C, N);
+        struct ggml_tensor * w_n    = ggml_repeat(ctx, block.dwconv_w, w_tmpl);         // [k, 1, C, N]
+        w_n                         = ggml_reshape_3d(ctx, w_n, w_n->ne[0], 1, C * N);  // [k, 1, C*N]
+        struct ggml_tensor * folded = ggml_reshape_3d(ctx, x_ext, x_ext->ne[0], C * N, 1);
+        y                           = ggml_conv_1d_dw(ctx, w_n, folded, 1, 0, 1);       // [T, C*N, 1]
+        y                           = ggml_reshape_3d(ctx, y, y->ne[0], C, N);
+    }
+    if (block.dwconv_b) {
+        struct ggml_tensor * b2d = ggml_reshape_2d(ctx, block.dwconv_b, 1, C);
+        y                        = ggml_add(ctx, y, b2d);
+    }
+
+    // LayerNorm wants the channel dim on ne[0]: transpose to [C, T, N].
+    y = ggml_cont(ctx, ggml_transpose(ctx, y));
+    y = ggml_norm(ctx, y, 1e-6f);
+    y = ggml_mul(ctx, y, block.norm_w);
+    y = ggml_add(ctx, y, block.norm_b);
+
+    y = ggml_mul_mat(ctx, block.pwconv1_w, y);
+    y = ggml_add(ctx, y, block.pwconv1_b);
+
+    y = ggml_gelu(ctx, y);
+
+    y = ggml_mul_mat(ctx, block.pwconv2_w, y);
+    y = ggml_add(ctx, y, block.pwconv2_b);
+
+    y = ggml_mul(ctx, y, block.gamma);
+
+    y = ggml_cont(ctx, ggml_transpose(ctx, y));
+
+    y = ggml_add(ctx, y, residual);
+    return y;
+}
+
+// Streaming upsample stage: transposed convs run the offline helper
+// (kernel == stride, exact under chunking), ConvNeXt blocks thread
+// their depthwise state.
+static struct ggml_tensor * upsample_stage_forward_stream(struct ggml_context *           ctx,
+                                                          struct ggml_cgraph *            gf,
+                                                          const QwenUpsampleStage *       stage,
+                                                          struct ggml_tensor *            x,
+                                                          const QwenUpsampleStreamState * st) {
+    int kernel = stage->upsample_ratio;
+    for (int i = 0; i < stage->num_blocks; i++) {
+        x = qwen_causal_trans_conv1d(ctx, stage->transconv_w[i], stage->transconv_b[i], x, stage->upsample_ratio,
+                                     kernel, stage->channels);
+        x = convnext_block_forward_stream(ctx, gf, stage->convnext[i], x, stage->dwconv_kernel, st->dw[i]);
+    }
+    return x;
+}

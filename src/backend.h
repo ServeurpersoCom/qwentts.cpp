@@ -1,13 +1,17 @@
 #pragma once
-// backend.h: shared GGML backend initialization
+// backend.h: GGML backend initialization
 //
 // All modules use the same pattern: load all backends, pick best GPU,
-// keep CPU as fallback. Single shared backend across modules in the
-// same binary, refcounted.
+// keep CPU as fallback. Each backend_init call returns a fresh backend
+// pair with its own device context and memory pool, so independent
+// qt_contexts never share allocator state and can run concurrently.
+// Sharing within one pipeline (talker, predictor, codec) is done by
+// passing the same BackendPair to each module.
 
 #include "ggml-backend.h"
 #include "qt-error.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -18,10 +22,6 @@ struct BackendPair {
     ggml_backend_t cpu_backend;
     bool           has_gpu;
 };
-
-// Cached backend state (shared across all modules in the same binary)
-static BackendPair g_backend_cache = {};
-static int         g_backend_refs  = 0;
 
 // Physical core count heuristic (logical / 2 for HT/SMT).
 // Used for GGML CPU thread count: GEMM shares SIMD units across hyperthreads,
@@ -63,23 +63,53 @@ static ggml_backend_t cpu_backend_new(int n_threads) {
 // Initialize backends: load all available (CUDA, Metal, Vulkan...),
 // pick the best one, keep CPU as fallback.
 // label: log prefix, e.g. "DiT", "VAE", "LM"
-// device: explicit device name ("cuda0", "vulkan", "cpu", ...) or
-//         nullptr to try GGML_BACKEND env var then auto-best.
-// Subsequent calls reuse the same backend (single VMM pool). Returns a
-// BackendPair with .backend == NULL when initialisation fails; the caller
-// must check this before passing it to any pipeline_*_load.
-static BackendPair backend_init(const char * label, const char * device = nullptr) {
-    if (g_backend_refs > 0) {
-        g_backend_refs++;
-        qt_log(QT_LOG_INFO, "[Load] %s backend: %s (shared)", label, ggml_backend_name(g_backend_cache.backend));
-        return g_backend_cache;
+// Each call returns a fresh backend pair with its own memory pool.
+// Returns a BackendPair with .backend == NULL when initialisation fails;
+// the caller must check this before passing it to any pipeline_*_load.
+// Collapse exact consecutive duplicate ggml log lines and report the total
+// count when the run ends (tames the CUDA graph capture "reused" flood).
+static void qt_ggml_log(enum ggml_log_level level, const char * text, void * user_data) {
+    (void) level;
+    (void) user_data;
+    static char last[256] = { 0 };
+    static int  count     = 0;
+
+    if (count > 0 && strcmp(text, last) == 0) {
+        count++;
+        return;
     }
 
-    ggml_backend_load_all();
+    if (count > 1) {
+        fprintf(stderr, "[Dedup] Previous line repeated %d times total\n", count);
+    }
+
+    fputs(text, stderr);
+    strncpy(last, text, sizeof(last) - 1);
+    last[sizeof(last) - 1] = 0;
+    count                  = 1;
+    fflush(stderr);
+}
+
+// device: explicit device name ("cuda0", "vulkan", "cpu", ...) or
+//         nullptr to try GGML_BACKEND env var then auto-best.
+static BackendPair backend_init(const char * label, const char * device = nullptr) {
+    // Magic static: log callback install and dynamic backend loading
+    // happen exactly once, safe under concurrent qt_init calls.
+    static const bool loaded = [] {
+        ggml_log_set(qt_ggml_log, nullptr);
+        ggml_backend_load_all();
+        return true;
+    }();
+    (void) loaded;
+
     BackendPair bp = {};
 
-    // "none" or "cpu" forces CPU-only mode (no GPU init attempt).
+    // device param overrides GGML_BACKEND env var ; both force a specific
+    // device instead of auto-best. Device names: CUDA0, Vulkan0, CPU, BLAS
+    // (see ggml_backend_dev_name).
     const char * force_backend = device ? device : std::getenv("GGML_BACKEND");
+
+    // "none" or "cpu" forces CPU-only mode (no GPU init attempt).
     if (force_backend && (strcmp(force_backend, "none") == 0 || strcmp(force_backend, "cpu") == 0)) {
         int  n_threads = backend_cpu_n_threads();
         bp.backend     = cpu_backend_new(n_threads);
@@ -90,13 +120,9 @@ static BackendPair backend_init(const char * label, const char * device = nullpt
         }
         bp.has_gpu = false;
         qt_log(QT_LOG_INFO, "[Load] %s backend: CPU (threads: %d)", label, n_threads);
-        g_backend_cache = bp;
-        g_backend_refs  = 1;
         return bp;
     }
 
-    // Explicit device name takes precedence over GGML_BACKEND env var.
-    // Device names: CUDA0, Vulkan0, CPU, BLAS (see ggml_backend_dev_name).
     if (force_backend) {
         bp.backend = ggml_backend_init_by_name(force_backend, nullptr);
         if (!bp.backend) {
@@ -139,26 +165,16 @@ static BackendPair backend_init(const char * label, const char * device = nullpt
     }
     bp.has_gpu = !best_is_cpu;
     qt_log(QT_LOG_INFO, "[Load] %s backend: %s (CPU threads: %d)", label, ggml_backend_name(bp.backend), n_threads);
-
-    g_backend_cache = bp;
-    g_backend_refs  = 1;
     return bp;
 }
 
-// Release a backend reference. Frees GPU + CPU backends when refcount hits 0.
+// Free a backend pair returned by backend_init.
 static void backend_release(ggml_backend_t backend, ggml_backend_t cpu_backend) {
-    if (g_backend_refs <= 0) {
-        return;
+    if (backend && backend != cpu_backend) {
+        ggml_backend_free(backend);
     }
-    g_backend_refs--;
-    if (g_backend_refs == 0) {
-        if (backend && backend != cpu_backend) {
-            ggml_backend_free(backend);
-        }
-        if (cpu_backend) {
-            ggml_backend_free(cpu_backend);
-        }
-        g_backend_cache = {};
+    if (cpu_backend) {
+        ggml_backend_free(cpu_backend);
     }
 }
 

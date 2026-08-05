@@ -71,7 +71,8 @@ struct QwenEncoderTransformer {
 
 static bool enc_trans_load(QwenEncoderTransformer * tr, const GGUFModel & gf, ggml_backend_t backend) {
     tr->hidden_size         = (int) gf_get_u32(gf, "qwen3-tts-tokenizer.encoder.hidden_size");
-    tr->num_layers          = (int) gf_get_u32(gf, "qwen3-tts-tokenizer.encoder.num_hidden_layers");
+    uint32_t num_layers     = gf_get_u32(gf, "qwen3-tts-tokenizer.encoder.num_hidden_layers");
+    tr->num_layers          = (int) num_layers;
     tr->num_attention_heads = (int) gf_get_u32(gf, "qwen3-tts-tokenizer.encoder.num_attention_heads");
     tr->num_kv_heads        = (int) gf_get_u32(gf, "qwen3-tts-tokenizer.encoder.num_key_value_heads");
     tr->head_dim            = (int) gf_get_u32(gf, "qwen3-tts-tokenizer.encoder.head_dim");
@@ -79,9 +80,8 @@ static bool enc_trans_load(QwenEncoderTransformer * tr, const GGUFModel & gf, gg
     tr->rope_theta          = gf_get_f32(gf, "qwen3-tts-tokenizer.encoder.rope_theta");
     tr->norm_eps            = gf_get_f32(gf, "qwen3-tts-tokenizer.encoder.norm_eps");
 
-    if (tr->num_layers > ENC_TRANS_MAX_LAYERS) {
-        fprintf(stderr, "[EncTransformer] FATAL: %d layers exceeds compile-time max %d\n", tr->num_layers,
-                ENC_TRANS_MAX_LAYERS);
+    if (num_layers == 0 || num_layers > (uint32_t) ENC_TRANS_MAX_LAYERS) {
+        fprintf(stderr, "[EncTransformer] FATAL: invalid layer count %u (max %d)\n", num_layers, ENC_TRANS_MAX_LAYERS);
         return false;
     }
 

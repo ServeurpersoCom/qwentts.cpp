@@ -164,3 +164,72 @@ static struct ggml_tensor * quant_decode(struct ggml_context *        ctx,
 
     return ggml_add(ctx, h_sem, h_aco);
 }
+
+// Streaming variant for the static frame graph computed directly on the
+// backend, without the scheduler's per view input duplication: every
+// codebook id passes through a ggml_cont so the get_rows sources land
+// on allocator aligned tensors, which the Vulkan get_rows path
+// requires. Same math and structure as quant_decode.
+static struct ggml_tensor * rvq_group_decode_stream(struct ggml_context * ctx,
+                                                    const QwenRVQGroup &  g,
+                                                    struct ggml_tensor *  codes_split,
+                                                    int                   T) {
+    struct ggml_tensor * sum = NULL;
+    for (int k = 0; k < g.num_codebooks; k++) {
+        struct ggml_tensor * idx = ggml_cont(ctx, ggml_view_1d(ctx, codes_split, T, (size_t) k * codes_split->nb[1]));
+        struct ggml_tensor * emb = ggml_get_rows(ctx, g.embed[(size_t) k], idx);
+        sum                      = (sum == NULL) ? emb : ggml_add(ctx, sum, emb);
+    }
+    return ggml_mul_mat(ctx, g.out_proj_w, sum);
+}
+
+static struct ggml_tensor * quant_decode_stream(struct ggml_context *        ctx,
+                                                const QwenQuantizerDecoder * dec,
+                                                struct ggml_tensor *         codes) {
+    int T = (int) codes->ne[0];
+
+    struct ggml_tensor * codes_sem = ggml_view_2d(ctx, codes, T, dec->num_semantic_quantizers, codes->nb[1], 0);
+    size_t               aco_off   = (size_t) dec->num_semantic_quantizers * codes->nb[1];
+    struct ggml_tensor * codes_aco = ggml_view_2d(ctx, codes, T, dec->num_acoustic_quantizers, codes->nb[1], aco_off);
+
+    struct ggml_tensor * h_sem = rvq_group_decode_stream(ctx, dec->semantic, codes_sem, T);
+    struct ggml_tensor * h_aco = rvq_group_decode_stream(ctx, dec->acoustic, codes_aco, T);
+
+    return ggml_add(ctx, h_sem, h_aco);
+}
+
+// Batched variant over M lanes: codes is [T, K, M] lane major. Every
+// codebook's T ids of every lane gather flat as [T * M] through a
+// strided view + cont (T contiguous inside a lane, lanes strided by
+// K * T), keeping the same alignment safe get_rows chain as the single
+// lane path. Returns [hidden, T, M] C-first.
+static struct ggml_tensor * rvq_group_decode_stream_batch(struct ggml_context * ctx,
+                                                          const QwenRVQGroup &  g,
+                                                          struct ggml_tensor *  codes,
+                                                          int                   k0,
+                                                          int                   T,
+                                                          int                   M) {
+    struct ggml_tensor * sum = NULL;
+    for (int k = 0; k < g.num_codebooks; k++) {
+        // Lane strided [T, M] view of codebook k0 + k, made flat [T * M].
+        struct ggml_tensor * idx2 = ggml_view_2d(ctx, codes, T, M, codes->nb[2], (size_t) (k0 + k) * codes->nb[1]);
+        struct ggml_tensor * idx  = ggml_reshape_1d(ctx, ggml_cont(ctx, idx2), (int64_t) T * M);
+        struct ggml_tensor * emb  = ggml_get_rows(ctx, g.embed[(size_t) k], idx);  // [hidden_in, T * M]
+        sum                       = (sum == NULL) ? emb : ggml_add(ctx, sum, emb);
+    }
+    return ggml_mul_mat(ctx, g.out_proj_w, sum);  // [hidden, T * M]
+}
+
+static struct ggml_tensor * quant_decode_stream_batch(struct ggml_context *        ctx,
+                                                      const QwenQuantizerDecoder * dec,
+                                                      struct ggml_tensor *         codes) {
+    int T = (int) codes->ne[0];
+    int M = (int) codes->ne[2];
+
+    struct ggml_tensor * h_sem = rvq_group_decode_stream_batch(ctx, dec->semantic, codes, 0, T, M);
+    struct ggml_tensor * h_aco =
+        rvq_group_decode_stream_batch(ctx, dec->acoustic, codes, dec->num_semantic_quantizers, T, M);
+
+    struct ggml_tensor * h = ggml_add(ctx, h_sem, h_aco);
+    return ggml_reshape_3d(ctx, h, h->ne[0], T, M);
+}
