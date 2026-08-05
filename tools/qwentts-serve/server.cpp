@@ -86,8 +86,7 @@ static void print_usage(const char * prog) {
             "  --sub-top-k <n>         Sub-talker top-k (default: 50)\n"
             "  --sub-top-p <f>         Sub-talker top-p (default: 1.0)\n\n"
             "Codec:\n"
-            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 5.0)\n"
-            "  --codec-left-dur <f>    Codec decode left context in seconds (default: 2.0)\n\n"
+            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 5.0)\n\n"
              "Debug:\n"
              "  --device <name>         Force a specific backend device (default: auto).\n"
              "                          Use \"cpu\" or \"none\" for CPU only.\n"
@@ -158,8 +157,6 @@ struct synth_state {
     int          subtalker_top_k;
     float        subtalker_top_p;
     std::string  dump_dir;
-    float        codec_chunk_sec;
-    float        codec_left_context_sec;
     // Reference audio (loaded at startup from --ref-wav / --ref-text)
     float *      ref_audio_24k;
     int          ref_n_samples;
@@ -324,8 +321,6 @@ static int run_synthesis(const synth_state & st, const tts_request & req,
     p.subtalker_temperature  = st.subtalker_temperature;
     p.subtalker_top_k        = st.subtalker_top_k;
     p.subtalker_top_p        = st.subtalker_top_p;
-    p.codec_chunk_sec        = st.codec_chunk_sec;
-    p.codec_left_context_sec = st.codec_left_context_sec;
 
     // Reference audio (loaded once at startup)
     if (st.ref_audio_24k && st.ref_n_samples > 0) {
@@ -492,8 +487,6 @@ int qwentts_server_main(int argc, char ** argv) {
             params.subtalker_top_p = (float) std::atof(argv[++i]);
         } else if (!std::strcmp(arg, "--codec-chunk-dur") && i + 1 < argc) {
             params.codec_chunk_sec = (float) std::atof(argv[++i]);
-        } else if (!std::strcmp(arg, "--codec-left-dur") && i + 1 < argc) {
-            params.codec_left_context_sec = (float) std::atof(argv[++i]);
         } else if (!std::strcmp(arg, "--dump") && i + 1 < argc) {
             params.dump_dir = argv[++i];
         } else if (!std::strcmp(arg, "--ref-wav") && i + 1 < argc) {
@@ -530,6 +523,7 @@ int qwentts_server_main(int argc, char ** argv) {
     iparams.device      = params.device.empty() ? nullptr : params.device.c_str();
     iparams.use_fa      = params.use_fa;
     iparams.clamp_fp16  = params.clamp_fp16;
+    iparams.codec_chunk_sec = params.codec_chunk_sec;
 
     struct qt_context * q = qt_init(&iparams);
     if (!q) {
@@ -575,8 +569,6 @@ int qwentts_server_main(int argc, char ** argv) {
     st.subtalker_top_k        = params.subtalker_top_k;
     st.subtalker_top_p        = params.subtalker_top_p;
     st.dump_dir               = params.dump_dir;
-    st.codec_chunk_sec        = params.codec_chunk_sec;
-    st.codec_left_context_sec = params.codec_left_context_sec;
     st.ref_audio_24k          = ref_audio;
     st.ref_n_samples          = ref_n;
     st.ref_text               = ref_text_buf;

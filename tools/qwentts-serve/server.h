@@ -30,8 +30,7 @@ struct server_params {
     float subtalker_temperature = 0.9f;
     int subtalker_top_k = 50;
     float subtalker_top_p = 1.0f;
-    float codec_chunk_sec = 5.0f;
-    float codec_left_context_sec = 2.0f;
+    float codec_chunk_sec = 0.0f;
     std::string dump_dir;
     std::string ref_wav;
     std::string ref_text;
