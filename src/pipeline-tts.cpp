@@ -152,7 +152,8 @@ bool pipeline_tts_load(PipelineTTS * pt,
                        bool          use_fa,
                        bool          clamp_fp16,
                        int           max_batch,
-                       float         codec_chunk_sec) {
+                       float         codec_chunk_sec,
+                       int           talker_max_ctx) {
     pt->bp                  = bp;
     pt->backend             = bp.backend;
     pt->sched               = NULL;
@@ -260,11 +261,17 @@ bool pipeline_tts_load(PipelineTTS * pt,
     }
 
     // KV caches, one set per slot: the talker holds the LM context up
-    // to 4096 positions (the longest ICL prompt observed is ~250 +
-    // max_new_tokens ~ 1500, so 4096 has 60% headroom). Predictor holds
-    // one frame of 16 sub-steps per slot.
+    // to talker_max_ctx positions (default 4096; the longest ICL prompt
+    // observed is ~250 + max_new_tokens ~ 1500, so 4096 has 60%
+    // headroom). Raise it for one-shot long prompts where VRAM allows.
+    // Predictor holds one frame of 16 sub-steps per slot.
+    if (talker_max_ctx <= 0) {
+        talker_max_ctx = 4096;
+    } else if (talker_max_ctx < 8) {
+        talker_max_ctx = 8;
+    }
     if (!kv_cache_init(&pt->talker_kv, pt->talker.num_hidden_layers, pt->talker.num_key_value_heads,
-                       pt->talker.head_dim, 4096, pt->max_batch, pt->backend)) {
+                       pt->talker.head_dim, talker_max_ctx, pt->max_batch, pt->backend)) {
         ggml_backend_sched_free(pt->sched);
         pt->sched = NULL;
         pipeline_codec_free(&pt->codec);

@@ -54,6 +54,8 @@ static void print_usage(const char * prog) {
             "  --ref-text <path>       Transcript file for the reference (enables ICL clone mode)\n"
             "  --max-new <n>           Max new audio frames (default: 2048)\n"
             "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 5.0)\n"
+            "  --talker-ctx <n>        Talker KV cache size in positions (default: 4096). Raise\n"
+            "                          for one-shot long prompts where VRAM allows\n"
             "  --stream-by-line        Flush synthesis at each newline, one WAV header per line (-o '-')\n\n"
             "Sampling:\n"
             "  --seed <int>            Sampling seed (default: -1 for random)\n"
@@ -105,6 +107,7 @@ struct Args {
     bool         clamp_fp16;
     bool         stream_by_line;
     float        codec_chunk_sec;
+    int          talker_max_ctx;
 };
 
 // Read all of stdin into a string. Binary mode on Windows so UTF-16 input
@@ -270,6 +273,8 @@ static bool parse_args(int argc, char ** argv, Args & a) {
             a.stream_by_line = true;
         } else if (std::strcmp(arg, "--codec-chunk-dur") == 0 && i + 1 < argc) {
             a.codec_chunk_sec = (float) std::atof(argv[++i]);
+        } else if (std::strcmp(arg, "--talker-ctx") == 0 && i + 1 < argc) {
+            a.talker_max_ctx = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "-o") == 0 && i + 1 < argc) {
             a.out_wav = argv[++i];
         } else {
@@ -293,6 +298,7 @@ static int run(const Args & a) {
     iparams.use_fa          = a.use_fa;
     iparams.clamp_fp16      = a.clamp_fp16;
     iparams.codec_chunk_sec = a.codec_chunk_sec;
+    iparams.talker_max_ctx  = a.talker_max_ctx;
 
     qt_context * q = qt_init(&iparams);
     if (!q) {

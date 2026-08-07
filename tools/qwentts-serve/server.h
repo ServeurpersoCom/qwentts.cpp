@@ -31,6 +31,7 @@ struct server_params {
     int subtalker_top_k = 50;
     float subtalker_top_p = 1.0f;
     float codec_chunk_sec = 0.0f;
+    int talker_max_ctx = 0;
     std::string dump_dir;
     std::string ref_wav;
     std::string ref_text;

@@ -146,6 +146,12 @@ struct qt_init_params {
     // and thread safe in both modes.
     int max_batch;
 
+    // Talker LM KV cache size in positions. 0 selects the default 4096.
+    // One-shot synthesis of a long prompt grows the context as prompt
+    // tokens + generated frames; raise it where VRAM allows. Each unit
+    // of context costs K+V storage per talker layer on the backend.
+    int talker_max_ctx;
+
     // Chunk width of the buffered codec decode, in seconds of
     // audio, resolved to an integer frame count at the codec frame rate
     // by qt_init and applied to every synthesis on the handle. A chunk
@@ -165,7 +171,7 @@ struct qt_init_params {
 
 // Initialise to the standard defaults: both paths NULL (caller must set
 // them before calling qt_init), use_fa true, clamp_fp16 false, device NULL,
-// max_batch 1, codec_chunk_sec 5.0.
+// max_batch 1, talker_max_ctx 0 (default 4096), codec_chunk_sec 5.0.
 QT_API void qt_init_default_params(struct qt_init_params * p);
 
 // Print available GGML backend devices to `out`. Useful for discovering

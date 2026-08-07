@@ -86,7 +86,9 @@ static void print_usage(const char * prog) {
             "  --sub-top-k <n>         Sub-talker top-k (default: 50)\n"
             "  --sub-top-p <f>         Sub-talker top-p (default: 1.0)\n\n"
             "Codec:\n"
-            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 5.0)\n\n"
+            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 5.0)\n"
+            "  --talker-ctx <n>        Talker KV cache size in positions (default: 4096). Raise\n"
+            "                          for one-shot long prompts where VRAM allows\n\n"
              "Debug:\n"
              "  --device <name>         Force a specific backend device (default: auto).\n"
              "                          Use \"cpu\" or \"none\" for CPU only.\n"
@@ -487,6 +489,8 @@ int qwentts_server_main(int argc, char ** argv) {
             params.subtalker_top_p = (float) std::atof(argv[++i]);
         } else if (!std::strcmp(arg, "--codec-chunk-dur") && i + 1 < argc) {
             params.codec_chunk_sec = (float) std::atof(argv[++i]);
+        } else if (!std::strcmp(arg, "--talker-ctx") && i + 1 < argc) {
+            params.talker_max_ctx = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--dump") && i + 1 < argc) {
             params.dump_dir = argv[++i];
         } else if (!std::strcmp(arg, "--ref-wav") && i + 1 < argc) {
@@ -524,6 +528,7 @@ int qwentts_server_main(int argc, char ** argv) {
     iparams.use_fa      = params.use_fa;
     iparams.clamp_fp16  = params.clamp_fp16;
     iparams.codec_chunk_sec = params.codec_chunk_sec;
+    iparams.talker_max_ctx  = params.talker_max_ctx;
 
     struct qt_context * q = qt_init(&iparams);
     if (!q) {
