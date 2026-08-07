@@ -1,11 +1,15 @@
 #pragma once
 // sampling-graph.h: the predictor sampling tail in standard ops, so
 // the whole frame decodes on the backend without per step logits
-// readbacks. Each tail applies the per step temperature, keeps the
-// top_k candidates, then draws one token where the cdf crosses the
-// per step uniform u. top_k bakes from the generation defaults at
-// build; nucleus filtering is not applied. Greedy slots upload u = 0,
-// which lands the draw on each slot's first (highest) candidate.
+// readbacks. Each tail applies the per step temperature, masks
+// everything below the top_k cutoff, then walks the cdf in vocabulary
+// order and draws the first token that crosses u * total, which is the
+// multinomial sample_top_k_p in sampling.h expressed as a graph: for a
+// given philox u both pick the same token, so the sub-talker sequence
+// stays aligned with the reference the cossim harnesses check against.
+// top_k bakes from the generation defaults at build; nucleus filtering
+// is not applied. Greedy slots upload u = 0, which pins the cutoff at
+// rank 0 so only the argmax survives the mask and any draw lands on it.
 //
 // Sampler inputs and the codes accumulator live in a caller owned
 // persistent context, never in gallocr input buffers. The uniform
@@ -39,9 +43,9 @@ static inline void sampler_inputs_build(struct ggml_context * pctx, SamplerInput
 }
 
 // Upload the per frame sampler state. Greedy slots (temperature <= 0)
-// carry temperature 1 and u 0, which selects the argmax through the
-// descending candidate order. subseq_base[i] indexes slot i's philox
-// stream: draw g uses subsequence subseq_base[i] + 1 + g.
+// carry temperature 1 and u 0, which the tail reads as the argmax
+// request. subseq_base[i] indexes slot i's philox stream: draw g uses
+// subsequence subseq_base[i] + 1 + g.
 static inline void sampler_inputs_upload(SamplerInputs * sp,
                                          const float *   temperature,
                                          const int64_t * seed,
@@ -77,39 +81,57 @@ static inline struct ggml_tensor * sampler_tail_build(struct ggml_context * gctx
 
     struct ggml_tensor * temp =
         ggml_view_2d(gctx, sp->state, 1, N, sp->state->nb[1], (size_t) step_idx * sp->state->nb[2]);
-    struct ggml_tensor * u =
-        ggml_view_2d(gctx, sp->state, 1, N, sp->state->nb[1], sp->state->nb[0] + (size_t) step_idx * sp->state->nb[2]);
+    // u feeds unary ops and a broadcast multiply, both of which want a
+    // packed row: the state view strides over the (temperature, u)
+    // pairs, so it materialises once here.
+    struct ggml_tensor * u = ggml_cont(gctx, ggml_view_2d(gctx, sp->state, 1, N, sp->state->nb[1],
+                                                          sp->state->nb[0] + (size_t) step_idx * sp->state->nb[2]));
 
     struct ggml_tensor * cur = ggml_div(gctx, logits, temp);
 
-    // keep each slot's top_k candidates, logits and ids in descending
-    // order. argsort guarantees the order on every backend (top_k does
-    // not), and the descending layout is what makes the u = 0 draw an
-    // argmax.
-    struct ggml_tensor * candidates = NULL;
-    if (sp->top_k > 0 && sp->top_k < n_vocab) {
-        struct ggml_tensor * order = ggml_argsort(gctx, cur, GGML_SORT_ORDER_DESC);
-        struct ggml_tensor * idx =
-            ggml_cont(gctx, ggml_view_2d(gctx, order, sp->top_k, N, order->nb[1], 0));  // [top_k, N] i32
-        struct ggml_tensor * a3d = ggml_reshape_3d(gctx, cur, 1, n_vocab, N);
-        cur                      = ggml_reshape_2d(gctx, ggml_get_rows(gctx, a3d, idx), sp->top_k, N);
-        candidates               = idx;
-    }
+    // Rank ordered token ids, highest logit first. argsort guarantees
+    // that order on every backend (top_k does not), and only two ranks
+    // are ever read back: rank 0 is the row max, rank k - 1 is the
+    // top_k cutoff. A k outside [1, n_vocab) falls back to the last
+    // rank, which keeps the whole row.
+    struct ggml_tensor * order = ggml_argsort(gctx, cur, GGML_SORT_ORDER_DESC);
+    struct ggml_tensor * cur3d = ggml_reshape_3d(gctx, cur, 1, n_vocab, N);
+    const int64_t k_rank = (sp->top_k > 0 && (int64_t) sp->top_k < n_vocab) ? (int64_t) sp->top_k - 1 : n_vocab - 1;
 
-    // draw one token per slot: find where the cdf crosses u
-    struct ggml_tensor * probs  = ggml_soft_max(gctx, cur);
-    struct ggml_tensor * cumsum = ggml_cumsum(gctx, probs);
+    // Logit sitting at a given rank, per slot: gather the token id out
+    // of the rank order, then that token's logit.
+    auto rank_logit = [&](int64_t rank) {
+        struct ggml_tensor * id =
+            ggml_cont(gctx, ggml_view_2d(gctx, order, 1, N, order->nb[1], (size_t) rank * order->nb[0]));
+        return ggml_reshape_2d(gctx, ggml_get_rows(gctx, cur3d, id), 1, N);  // [1, N]
+    };
+    struct ggml_tensor * max_logit = rank_logit(0);
+    struct ggml_tensor * kth_logit = rank_logit(k_rank);
 
-    struct ggml_tensor * diff       = ggml_sub(gctx, cumsum, u);
-    struct ggml_tensor * cross_mask = ggml_step(gctx, diff);
+    // Greedy slots upload u = 0 and no philox draw, so the cutoff moves
+    // up to the row max and the mask keeps the argmax alone; every
+    // other slot cuts at the top_k rank.
+    struct ggml_tensor * stochastic = ggml_step(gctx, u);  // 1 where u > 0
+    struct ggml_tensor * cutoff =
+        ggml_add(gctx, max_logit, ggml_mul(gctx, stochastic, ggml_sub(gctx, kth_logit, max_logit)));
+
+    // 1 on the kept tokens: step is a strict compare, so the mask is
+    // built from its complement to keep the ties at the cutoff, the
+    // same way the host sampler masks logits below the threshold.
+    struct ggml_tensor * dropped = ggml_step(gctx, ggml_neg(gctx, ggml_sub(gctx, cur, cutoff)));
+    struct ggml_tensor * keep    = ggml_scale_bias(gctx, dropped, -1.0f, 1.0f);
+
+    // Draw in vocabulary order over the unnormalised exponentials, the
+    // multinomial of sampling.h: the token where the running sum first
+    // passes u * total. Masked tokens contribute nothing, so the walk
+    // can never land on one.
+    struct ggml_tensor * weights = ggml_mul(gctx, ggml_exp(gctx, ggml_sub(gctx, cur, max_logit)), keep);
+    struct ggml_tensor * cdf     = ggml_cumsum(gctx, weights);
+    struct ggml_tensor * total =
+        ggml_cont(gctx, ggml_view_2d(gctx, cdf, 1, N, cdf->nb[1], (size_t) (n_vocab - 1) * cdf->nb[0]));
+    struct ggml_tensor * cross_mask = ggml_step(gctx, ggml_sub(gctx, cdf, ggml_mul(gctx, total, u)));
     struct ggml_tensor * idxf       = ggml_sum_rows(gctx, cross_mask);  // [1, N]
-    struct ggml_tensor * idx =
-        ggml_cast(gctx, ggml_scale_bias(gctx, idxf, -1.0f, (float) cross_mask->ne[0]), GGML_TYPE_I32);
-
-    if (candidates) {
-        struct ggml_tensor * cand_3d = ggml_reshape_3d(gctx, candidates, 1, candidates->ne[0], N);
-        idx                          = ggml_get_rows(gctx, cand_3d, idx);  // [1, 1, N]
-    }
+    struct ggml_tensor * idx = ggml_cast(gctx, ggml_scale_bias(gctx, idxf, -1.0f, (float) n_vocab), GGML_TYPE_I32);
 
     struct ggml_tensor * ids = ggml_reshape_1d(gctx, idx, N);
     struct ggml_tensor * dst = ggml_view_1d(gctx, sp->codes, N, (size_t) (step_idx + 1) * sp->codes->nb[1]);
