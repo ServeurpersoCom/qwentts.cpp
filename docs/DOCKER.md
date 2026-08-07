@@ -1,9 +1,16 @@
 # Docker
 
 Pre-built images: `ghcr.io/serveurpersocom/qwentts.cpp:cpu`,
-`:cuda` and `:vulkan` (also tagged per release, e.g. `:cuda-v1.2.3`).
-All three run `tts-server`; `qwen-tts` and `qwen-codec` are included in
-the same image at `/app/`.
+`:cuda12`, `:cuda13` and `:vulkan` (also tagged per release, e.g.
+`:cuda12-v1.2.3`). All four run `tts-server`; `qwen-tts` and
+`qwen-codec` are included in the same image at `/app/`.
+
+`:cuda12` (CUDA 12.9.x) is built against the widest arch range,
+Pascal (sm_61) through Blackwell Ultra (120a/121a); `:cuda13`
+(CUDA 13.3.x) covers Turing and newer only -- upstream dropped
+offline compilation for pre-Turing architectures in CUDA 13, so a
+Pascal/Maxwell card needs `:cuda12`. See `CMakeLists.txt` for the
+full per-toolkit-version arch table.
 
 ```
 docker run --rm -p 8080:8080 \
@@ -22,8 +29,11 @@ docker run --rm --gpus all -p 8080:8080 \
     -v /path/to/voices:/voices:ro \
     -e MODEL_PATH=/models/qwen-talker-1.7b-base-Q8_0.gguf \
     -e CODEC_PATH=/models/qwen-tokenizer-12hz-Q8_0.gguf \
-    ghcr.io/serveurpersocom/qwentts.cpp:cuda
+    ghcr.io/serveurpersocom/qwentts.cpp:cuda12
 ```
+
+Use `:cuda13` instead of `:cuda12` for a newer CUDA toolkit if your
+card is Turing (sm_75) or newer -- see the note above.
 
 Vulkan image (AMD/Intel GPUs), passing through the DRI device node:
 
@@ -36,9 +46,9 @@ docker run --rm --device /dev/dri -p 8080:8080 \
 ```
 
 The `:vulkan` image bundles Mesa's Vulkan drivers (AMD/Intel). On an
-NVIDIA GPU, prefer `:cuda`; running `:vulkan` there would additionally
-need the host's proprietary NVIDIA Vulkan ICD mounted in, which the
-image does not provide.
+NVIDIA GPU, prefer `:cuda12` / `:cuda13`; running `:vulkan` there would
+additionally need the host's proprietary NVIDIA Vulkan ICD mounted in,
+which the image does not provide.
 
 ## Entrypoint environment variables
 
@@ -103,10 +113,12 @@ uses the last stage in the `Dockerfile` (`cuda`).
 detect against. This project's own `CMakeLists.txt` already handles
 that by defaulting `CMAKE_CUDA_ARCHITECTURES` to a fixed Pascal-and-newer
 list (`61-real;75-virtual;80-virtual;86-real;89-real`, plus Blackwell
-with CUDA 12.8+) when the variable isn't set, so Pascal cards (sm_61,
-e.g. the GTX 10-series) work out of the box with no override. GPUs
-older than Pascal (Maxwell and earlier) still need the architecture
-passed explicitly:
+`120a-real` with CUDA 12.8+ and Blackwell Ultra `121a-real` with CUDA
+12.9+) when the variable isn't set, so Pascal cards (sm_61, e.g. the
+GTX 10-series) work out of the box with no override -- as long as the
+toolkit is 12.x (CUDA 13 dropped Pascal offline compilation entirely,
+see `:cuda13` above). GPUs older than Pascal (Maxwell and earlier)
+still need the architecture passed explicitly:
 
 ```
 docker build --target cuda -t qwentts.cpp:cuda \

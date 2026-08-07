@@ -15,9 +15,15 @@
 #   docker build --target cuda -t qwentts.cpp:cuda \
 #       --build-arg CMAKE_CUDA_ARCHITECTURES=50 .   # Maxwell
 # See docs/DOCKER.md for details.
+#
+# Defaults to the newest CUDA 12.x (widest arch range, see CMakeLists.txt);
+# override both ARGs for CUDA 13.x instead, as the cuda13 CI variant does:
+#   docker build --target cuda -t qwentts.cpp:cuda13 \
+#       --build-arg CUDA_BUILD_IMAGE=nvidia/cuda:13.3.1-devel-ubuntu22.04 \
+#       --build-arg CUDA_RUNTIME_IMAGE=nvidia/cuda:13.3.1-runtime-ubuntu22.04 .
 
-ARG CUDA_BUILD_IMAGE=nvidia/cuda:12.4.1-devel-ubuntu22.04
-ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04
+ARG CUDA_BUILD_IMAGE=nvidia/cuda:12.9.2-devel-ubuntu22.04
+ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.9.2-runtime-ubuntu22.04
 
 # ---------------------------------------------------------------- CPU build
 FROM ubuntu:22.04 AS build-cpu
