@@ -18,6 +18,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -123,12 +124,15 @@ struct qt_context;
 // F32 manual chain); clamp_fp16 inserts ggml_clamp(-65504, 65504) on V
 // before attention and on the residual stream between blocks to guard
 // FP16 matmul accumulation on sub Ampere CUDA targets.
+// device selects the GGML backend: NULL = auto (try GGML_BACKEND env
+// var then pick best GPU), or a device name ("cuda0", "vulkan", "cpu").
 struct qt_init_params {
     int          abi_version;
     const char * talker_path;
     const char * codec_path;
     bool         use_fa;
     bool         clamp_fp16;
+    const char * device;  // NULL = auto, or device name like "cuda0"
 
     // Maximum number of concurrent synthesis requests batched
     // on the GPU. 0 and 1 select the single sequence behavior; values
@@ -142,6 +146,12 @@ struct qt_init_params {
     // and thread safe in both modes.
     int max_batch;
 
+    // Talker LM KV cache size in positions. 0 selects the default 4096.
+    // One-shot synthesis of a long prompt grows the context as prompt
+    // tokens + generated frames; raise it where VRAM allows. Each unit
+    // of context costs K+V storage per talker layer on the backend.
+    int talker_max_ctx;
+
     // Chunk width of the buffered codec decode, in seconds of
     // audio, resolved to an integer frame count at the codec frame rate
     // by qt_init and applied to every synthesis on the handle. A chunk
@@ -153,16 +163,21 @@ struct qt_init_params {
     // buys no memory while costing one redecode of the context per
     // chunk. A chunk covering the whole utterance decodes in a single
     // pass and is the exact reference; any split leaves a residual on
-    // the order of -50 dB. 0 selects the upstream default, 24.0 (300
+    // the order of -50 dB. 0 selects the upstream default, 5.0 (62
     // frames at 12.5 Hz). The streaming path frames its own chunks
     // through the persistent codec stream state and reads none of this.
     float codec_chunk_sec;
 };
 
 // Initialise to the standard defaults: both paths NULL (caller must set
-// them before calling qt_init), use_fa true, clamp_fp16 false,
-// max_batch 1, codec_chunk_sec 24.0.
+// them before calling qt_init), use_fa true, clamp_fp16 false, device NULL,
+// max_batch 1, talker_max_ctx 0 (default 4096), codec_chunk_sec 5.0.
 QT_API void qt_init_default_params(struct qt_init_params * p);
+
+// Print available GGML backend devices to `out`. Useful for discovering
+// device names to pass via qt_init_params.device. Safe to call any time
+// (backends are loaded lazily). Prints one device name per line.
+QT_API void qt_list_devices(FILE * out);
 
 // Allocate every module described by params. Returns NULL on any
 // failure after releasing whatever it has allocated so far. The

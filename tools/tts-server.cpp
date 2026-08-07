@@ -52,7 +52,9 @@ static void print_usage(const char * prog) {
             "  --max-batch <n>         Concurrent requests batched on the GPU (default: 1)\n"
             "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
-            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds, wav responses (default: 24.0)\n",
+            "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds, wav responses (default: 24.0)\n"
+            "  --talker-ctx <n>        Talker KV cache size in positions (default: 4096). Raise\n"
+            "                          for one-shot long prompts where VRAM allows\n",
             prog);
 }
 
@@ -72,6 +74,7 @@ int main(int argc, char ** argv) {
     bool          use_fa          = true;
     bool          clamp_fp16      = false;
     int           max_batch       = 1;
+    int           talker_max_ctx  = 0;
     // Chunk sentinel : qt_init resolves a non positive value to the
     // library default.
     float         codec_chunk_dur = 0.0f;
@@ -98,6 +101,8 @@ int main(int argc, char ** argv) {
             max_batch = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--codec-chunk-dur") && i + 1 < argc) {
             codec_chunk_dur = (float) std::atof(argv[++i]);
+        } else if (!std::strcmp(arg, "--talker-ctx") && i + 1 < argc) {
+            talker_max_ctx = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--help") || !std::strcmp(arg, "-h")) {
             print_usage(argv[0]);
             return 0;
@@ -120,6 +125,7 @@ int main(int argc, char ** argv) {
     iparams.use_fa          = use_fa;
     iparams.clamp_fp16      = clamp_fp16;
     iparams.max_batch       = max_batch;
+    iparams.talker_max_ctx  = talker_max_ctx;
     iparams.codec_chunk_sec = codec_chunk_dur;
 
     struct qt_context * q = qt_init(&iparams);

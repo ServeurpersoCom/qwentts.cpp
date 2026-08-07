@@ -212,9 +212,17 @@ void qt_log_set(qt_log_cb cb, void * user_data) {
     g_log_cb.store(cb, std::memory_order_release);
 }
 
-// Codec chunk default, shared by qt_init_default_params and the
-// qt_init resolution of an unset value.
-static const float QT_CODEC_CHUNK_SEC_DEFAULT = 24.0f;
+void qt_list_devices(FILE * out) {
+    ggml_backend_load_all();
+    int n = (int) ggml_backend_dev_count();
+    fprintf(out, "Available devices (%d):\n", n);
+    for (int i = 0; i < n; i++) {
+        fprintf(out, "  %s\n", ggml_backend_dev_name(ggml_backend_dev_get(i)));
+    }
+}
+
+// Codec chunk default, default shared by qt_init_default_params.
+static const float QT_CODEC_CHUNK_SEC_DEFAULT = 5.0f;
 
 void qt_init_default_params(struct qt_init_params * p) {
     p->abi_version = QT_ABI_VERSION;
@@ -222,8 +230,9 @@ void qt_init_default_params(struct qt_init_params * p) {
     p->codec_path  = nullptr;
     p->use_fa      = true;
     p->clamp_fp16  = false;
+    p->device      = nullptr;
     p->max_batch   = 1;
-
+    p->talker_max_ctx = 0;
     p->codec_chunk_sec = QT_CODEC_CHUNK_SEC_DEFAULT;
 }
 
@@ -356,13 +365,13 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
     // qt_free, which is idempotent on partial state (NULL-safe sched,
     // NULL GGUF handles, refcount-correct backend release).
     try {
-        q->bp = backend_init("Talker");
+        q->bp = backend_init("Talker", params->device);
         if (!q->bp.backend) {
             qt_throw("qt_init: backend_init failed (no GGML backend available)");
         }
 
         if (!pipeline_tts_load(&q->pt, params->talker_path, params->codec_path, q->bp, params->use_fa,
-                               params->clamp_fp16, max_batch, chunk_sec)) {
+                               params->clamp_fp16, max_batch, chunk_sec, params->talker_max_ctx)) {
             qt_throw("qt_init: pipeline_tts_load failed for '%s' / '%s'", params->talker_path, params->codec_path);
         }
 

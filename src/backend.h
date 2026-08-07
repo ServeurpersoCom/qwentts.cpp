@@ -90,7 +90,9 @@ static void qt_ggml_log(enum ggml_log_level level, const char * text, void * use
     fflush(stderr);
 }
 
-static BackendPair backend_init(const char * label) {
+// device: explicit device name ("cuda0", "vulkan", "cpu", ...) or
+//         nullptr to try GGML_BACKEND env var then auto-best.
+static BackendPair backend_init(const char * label, const char * device = nullptr) {
     // Magic static: log callback install and dynamic backend loading
     // happen exactly once, safe under concurrent qt_init calls.
     static const bool loaded = [] {
@@ -102,9 +104,25 @@ static BackendPair backend_init(const char * label) {
 
     BackendPair bp = {};
 
-    // GGML_BACKEND env var: force a specific device instead of auto-best.
-    // Device names: CUDA0, Vulkan0, CPU, BLAS (see ggml_backend_dev_name).
-    const char * force_backend = std::getenv("GGML_BACKEND");
+    // device param overrides GGML_BACKEND env var ; both force a specific
+    // device instead of auto-best. Device names: CUDA0, Vulkan0, CPU, BLAS
+    // (see ggml_backend_dev_name).
+    const char * force_backend = device ? device : std::getenv("GGML_BACKEND");
+
+    // "none" or "cpu" forces CPU-only mode (no GPU init attempt).
+    if (force_backend && (strcmp(force_backend, "none") == 0 || strcmp(force_backend, "cpu") == 0)) {
+        int  n_threads = backend_cpu_n_threads();
+        bp.backend     = cpu_backend_new(n_threads);
+        bp.cpu_backend = bp.backend;
+        if (!bp.backend) {
+            qt_log(QT_LOG_ERROR, "[Load] failed to init CPU backend");
+            return BackendPair{};
+        }
+        bp.has_gpu = false;
+        qt_log(QT_LOG_INFO, "[Load] %s backend: CPU (threads: %d)", label, n_threads);
+        return bp;
+    }
+
     if (force_backend) {
         bp.backend = ggml_backend_init_by_name(force_backend, nullptr);
         if (!bp.backend) {
