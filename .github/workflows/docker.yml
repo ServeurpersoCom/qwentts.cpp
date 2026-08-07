@@ -42,7 +42,7 @@ jobs:
         id: tags
         shell: bash
         run: |
-          image="ghcr.io/${{ github.repository }}"
+          image="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           variant="${{ matrix.variant }}"
           tags="${image}:${variant}-${{ github.sha }}"
           if [ "${{ github.ref }}" = "refs/heads/master" ]; then
