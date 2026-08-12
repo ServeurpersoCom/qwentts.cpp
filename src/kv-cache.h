@@ -18,9 +18,9 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml.h"
+#include "qt-error.h"
 
 #include <cstddef>
-#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
@@ -83,7 +83,7 @@ static bool kv_cache_init(KVCache *      kv,
     };
     kv->ctx = ggml_init(gp);
     if (!kv->ctx) {
-        fprintf(stderr, "[KVCache] FATAL: ggml_init failed\n");
+        qt_log(QT_LOG_ERROR, "[KVCache] FATAL: ggml_init failed");
         return false;
     }
 
@@ -112,7 +112,7 @@ static bool kv_cache_init(KVCache *      kv,
 
     kv->buffer = ggml_backend_alloc_ctx_tensors(kv->ctx, backend);
     if (!kv->buffer) {
-        fprintf(stderr, "[KVCache] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[KVCache] FATAL: backend allocation failed");
         ggml_free(kv->ctx);
         kv->ctx = NULL;
         return false;
@@ -124,7 +124,7 @@ static bool kv_cache_init(KVCache *      kv,
     size_t bytes_per_layer =
         (size_t) head_dim * (size_t) max_seq_len * (size_t) n_kv_heads * (size_t) n_sets * sizeof(float);
     size_t total_mb = (size_t) (2 * n_layers) * bytes_per_layer / (1024 * 1024);
-    fprintf(stderr, "[KVCache] Allocated: %d layers, %d KV heads, head_dim %d, max_seq_len %d, %d sets -> %zu MB\n",
+    qt_log(QT_LOG_INFO, "[KVCache] Allocated: %d layers, %d KV heads, head_dim %d, max_seq_len %d, %d sets -> %zu MB",
             n_layers, n_kv_heads, head_dim, max_seq_len, n_sets, total_mb);
     return true;
 }

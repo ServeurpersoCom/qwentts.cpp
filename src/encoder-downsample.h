@@ -9,9 +9,9 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "qt-error.h"
 #include "weight-ctx.h"
 
-#include <cstdio>
 #include <cstdlib>
 
 struct QwenEncoderDownsample {
@@ -32,7 +32,7 @@ static bool enc_down_load(QwenEncoderDownsample * d, const GGUFModel & gf, ggml_
     wctx_init(&wctx, 4);
     d->weight = gf_load_conv(&wctx, gf, "tok_enc.downsample.weight");
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[EncDownsample] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[EncDownsample] FATAL: backend allocation failed");
         return false;
     }
     d->weight_ctx = wctx.ctx;
@@ -41,8 +41,8 @@ static bool enc_down_load(QwenEncoderDownsample * d, const GGUFModel & gf, ggml_
     d->in_ch  = (int) d->weight->ne[1];
     d->out_ch = (int) d->weight->ne[2];
 
-    fprintf(stderr, "[EncDownsample] Loaded: k=%d stride=%d, %d -> %d channels, weights %.1f MB\n", d->kernel,
-            d->stride, d->in_ch, d->out_ch, (float) ggml_backend_buffer_get_size(d->weight_buf) / (1024.0f * 1024.0f));
+    qt_log(QT_LOG_INFO, "[EncDownsample] Loaded: k=%d stride=%d, %d -> %d channels, weights %.1f MB", d->kernel,
+           d->stride, d->in_ch, d->out_ch, (float) ggml_backend_buffer_get_size(d->weight_buf) / (1024.0f * 1024.0f));
     return true;
 }
 

@@ -6,10 +6,10 @@
 // config in the GGUF; T is derived from the file size:
 // T = (filesize * 8) / (K * code_bits).
 
+#include "qt-error.h"
 #include "utf8.h"
 
 #include <cstdint>
-#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -69,13 +69,13 @@ static bool rvq_read_buf(const uint8_t *        data,
                          std::vector<int32_t> & codes,
                          int *                  n_frames) {
     if (size == 0) {
-        fprintf(stderr, "[RVQ] FATAL: empty code stream\n");
+        qt_log(QT_LOG_ERROR, "[RVQ] FATAL: empty code stream");
         return false;
     }
     const size_t total_bits = size * 8;
     const size_t n_codes    = total_bits / (size_t) code_bits;
     if (n_codes == 0 || (n_codes % (size_t) K) != 0) {
-        fprintf(stderr, "[RVQ] FATAL: stream yields %zu codes, not a multiple of K=%d\n", n_codes, K);
+        qt_log(QT_LOG_ERROR, "[RVQ] FATAL: stream yields %zu codes, not a multiple of K=%d", n_codes, K);
         return false;
     }
     std::vector<uint8_t> buf(data, data + size);
@@ -87,20 +87,20 @@ static bool rvq_read_buf(const uint8_t *        data,
 static bool rvq_read_file(const char * path, int K, int code_bits, std::vector<int32_t> & codes, int * n_frames) {
     FILE * f = utf8_fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "[RVQ] FATAL: cannot open %s\n", path);
+        qt_log(QT_LOG_ERROR, "[RVQ] FATAL: cannot open %s", path);
         return false;
     }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz <= 0) {
-        fprintf(stderr, "[RVQ] FATAL: %s is empty\n", path);
+        qt_log(QT_LOG_ERROR, "[RVQ] FATAL: %s is empty", path);
         fclose(f);
         return false;
     }
     std::vector<uint8_t> buf((size_t) sz);
     if (fread(buf.data(), 1, buf.size(), f) != buf.size()) {
-        fprintf(stderr, "[RVQ] FATAL: short read on %s\n", path);
+        qt_log(QT_LOG_ERROR, "[RVQ] FATAL: short read on %s", path);
         fclose(f);
         return false;
     }
@@ -113,11 +113,11 @@ static bool rvq_write_file(const char * path, const std::vector<int32_t> & codes
     std::vector<uint8_t> packed = rvq_pack_codes(codes, code_bits);
     FILE *               f      = utf8_fopen(path, "wb");
     if (!f) {
-        fprintf(stderr, "[RVQ] FATAL: cannot open %s for write\n", path);
+        qt_log(QT_LOG_ERROR, "[RVQ] FATAL: cannot open %s for write", path);
         return false;
     }
     if (fwrite(packed.data(), 1, packed.size(), f) != packed.size()) {
-        fprintf(stderr, "[RVQ] FATAL: short write on %s\n", path);
+        qt_log(QT_LOG_ERROR, "[RVQ] FATAL: short write on %s", path);
         fclose(f);
         return false;
     }

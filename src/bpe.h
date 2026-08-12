@@ -11,10 +11,10 @@
 // such as TTS style markers and language tags).
 
 #include "gguf.h"
+#include "qt-error.h"
 
 #include <cassert>
 #include <climits>
-#include <cstdio>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -410,14 +410,14 @@ static bool load_bpe_from_gguf(BPETokenizer * tok, const char * gguf_path) {
     struct gguf_init_params gp  = { true, NULL };
     struct gguf_context *   ctx = gguf_init_from_file(gguf_path, gp);
     if (!ctx) {
-        fprintf(stderr, "[BPE] Failed to open %s\n", gguf_path);
+        qt_log(QT_LOG_ERROR, "[BPE] Failed to open %s", gguf_path);
         return false;
     }
 
     int64_t tok_key = gguf_find_key(ctx, "tokenizer.ggml.tokens");
     int64_t mrg_key = gguf_find_key(ctx, "tokenizer.ggml.merges");
     if (tok_key < 0 || mrg_key < 0) {
-        fprintf(stderr, "[BPE] Tokenizer not found in %s\n", gguf_path);
+        qt_log(QT_LOG_ERROR, "[BPE] Tokenizer not found in %s", gguf_path);
         gguf_free(ctx);
         return false;
     }
@@ -454,7 +454,7 @@ static bool load_bpe_from_gguf(BPETokenizer * tok, const char * gguf_path) {
         bpe_add_special(tok, "<|endoftext|>", tok->eos_id);
     }
 
-    fprintf(stderr, "[BPE] Loaded from GGUF: %d vocab, %d merges, eos_id=%d\n", tok->n_vocab, n_merges, tok->eos_id);
+    qt_log(QT_LOG_INFO, "[BPE] Loaded from GGUF: %d vocab, %d merges, eos_id=%d", tok->n_vocab, n_merges, tok->eos_id);
     return true;
 }
 
@@ -469,7 +469,7 @@ static bool bpe_load_specials_from_keys(BPETokenizer *       tok,
     struct gguf_init_params gp  = { true, NULL };
     struct gguf_context *   ctx = gguf_init_from_file(gguf_path, gp);
     if (!ctx) {
-        fprintf(stderr, "[BPE] Failed to open %s for specials\n", gguf_path);
+        qt_log(QT_LOG_ERROR, "[BPE] Failed to open %s for specials", gguf_path);
         return false;
     }
 
@@ -477,17 +477,17 @@ static bool bpe_load_specials_from_keys(BPETokenizer *       tok,
     for (int i = 0; i < n_keys; i++) {
         int64_t k = gguf_find_key(ctx, keys[i]);
         if (k < 0) {
-            fprintf(stderr, "[BPE] WARNING: missing %s in GGUF\n", keys[i]);
+            qt_log(QT_LOG_WARN, "[BPE] WARNING: missing %s in GGUF", keys[i]);
             continue;
         }
         int id = (int) gguf_get_val_u32(ctx, k);
         if (id < 0 || id >= tok->n_vocab) {
-            fprintf(stderr, "[BPE] WARNING: %s id=%d out of vocab range\n", keys[i], id);
+            qt_log(QT_LOG_WARN, "[BPE] WARNING: %s id=%d out of vocab range", keys[i], id);
             continue;
         }
         const std::string & s = tok->id_to_str[id];
         if (s.empty()) {
-            fprintf(stderr, "[BPE] WARNING: %s id=%d has empty vocab string\n", keys[i], id);
+            qt_log(QT_LOG_WARN, "[BPE] WARNING: %s id=%d has empty vocab string", keys[i], id);
             continue;
         }
         bpe_add_special(tok, s, id);
@@ -495,7 +495,7 @@ static bool bpe_load_specials_from_keys(BPETokenizer *       tok,
     }
 
     gguf_free(ctx);
-    fprintf(stderr, "[BPE] Registered %d arch special tokens (total specials=%zu)\n", n_added, tok->specials.size());
+    qt_log(QT_LOG_INFO, "[BPE] Registered %d arch special tokens (total specials=%zu)", n_added, tok->specials.size());
     return true;
 }
 
@@ -569,7 +569,7 @@ static void encode_chunk(const BPETokenizer * tok, const std::string & chunk, st
             ids.push_back(it->second);
         } else {
             // Fallback: encode each byte individually (should not happen with byte-level BPE)
-            fprintf(stderr, "[BPE] WARNING: unknown token '%s'\n", piece.c_str());
+            qt_log(QT_LOG_WARN, "[BPE] WARNING: unknown token '%s'", piece.c_str());
             for (unsigned char c : piece) {
                 auto it2 = tok->vocab.find(std::string(1, c));
                 if (it2 != tok->vocab.end()) {
