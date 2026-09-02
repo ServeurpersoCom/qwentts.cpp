@@ -512,7 +512,7 @@ hash and commit date.
 
 ### Low-level API : src/pipeline-tts.h, src/pipeline-codec.h
 
-Direct access to `pipeline_tts_load` / `pipeline_tts_synthesize`,
+Direct access to `pipeline_tts_load` / `tts_engine_admit` / `tts_engine_step`,
 `pipeline_codec_encode` / `pipeline_codec_decode`,
 `pipeline_codec_stream_reset` / `pipeline_codec_decode_stream`,
 `codec_chunked_decode`, and the talker / predictor forwards. Used by the

@@ -30,10 +30,11 @@ struct voice_entry {
 };
 
 // Registered voices, name keyed. Every access happens under
-// g_voices_mutex; the GPU side of a registration is serialized inside
-// the ABI (qt_extract_voice_ref slips between batch frames), and the
-// synthesize lookup copies the latents out so a concurrent replace or
-// delete never frees buffers a running synthesis still reads.
+// g_voices_mutex; the backend side of a registration runs on the
+// library compute worker (qt_extract_voice_ref blocks until it lands
+// between two engine frames), and the synthesize lookup copies the
+// latents out so a concurrent replace or delete never frees buffers a
+// running synthesis still reads.
 static std::mutex                                   g_voices_mutex;
 static std::unordered_map<std::string, voice_entry> g_voices;
 

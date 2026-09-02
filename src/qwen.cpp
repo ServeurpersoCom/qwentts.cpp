@@ -39,34 +39,44 @@
 #include <thread>
 #include <vector>
 
+// One voice reference extraction driven by the worker. The caller owns
+// audio and out for the whole lifetime of the job; status and error
+// fill at completion. error carries the qt_last_error() text captured
+// on the worker thread, so the caller replays it into its own thread
+// local slot. done is the owner's completion flag.
+struct RefJob {
+    const float *         audio;
+    int                   n_samples;
+    struct qt_voice_ref * out;
+    qt_status             status;
+    std::string           error;
+    bool                  done;
+};
+
 // Internal definition of the opaque handle. C++ types are fine here
 // because nothing in this struct ever crosses the public ABI boundary :
 // callers only ever see `struct qt_context *`. PipelineTTS already
 // embeds the PipelineCodec, so no separate codec field is needed.
 //
-// gpu_mu serializes every GPU touching entry: the batch worker holds
-// it per engine phase (admit, frame step) so a voice extraction or a
-// max_batch == 1 synthesize slips between frames instead of racing the
-// backend from another thread.
-//
-// The scheduler members drive the max_batch > 1 mode: qt_synthesize
-// enqueues a TtsJob and blocks on cv_done until the worker retires it.
-// The worker owns the long lived TtsEngine, admits queued jobs into
-// free slots between frames and steps the batch until both the queue
-// and the slots drain.
+// The worker thread is the single owner of every GGML compute on the
+// handle: qt_synthesize enqueues a TtsJob, qt_extract_voice_ref
+// enqueues a RefJob, and both block on cv_done until the worker retires
+// them. One compute owner means one backend thread team for the whole
+// process and no mutex around the backend. The worker holds the long
+// lived TtsEngine, drains pending extractions at a frame boundary,
+// admits queued jobs into free slots and steps the batch until both the
+// queues and the slots drain.
 struct qt_context {
     BackendPair  bp;
     PipelineTTS  pt;
     BPETokenizer tok;
 
-    std::mutex gpu_mu;
-
-    int                     max_batch = 1;
     std::thread             worker;
     std::mutex              mu;
     std::condition_variable cv_work;
     std::condition_variable cv_done;
     std::deque<TtsJob *>    queue;
+    std::deque<RefJob *>    ref_queue;
     bool                    stop = false;
 };
 
@@ -168,7 +178,7 @@ void qt_log(qt_log_level level, const char * fmt, ...) {
 
 // Resolve a -1 seed to a hardware random 64-bit value. Anything else is
 // forwarded verbatim, so reproducibility is one explicit seed away. The
-// resolved value travels into pipeline_tts_synthesize so the dump traces
+// resolved value travels into the job the engine runs so the dump traces
 // log the exact seed that drove the sampler, even when the caller asked
 // for non determinism.
 static int64_t qt_resolve_seed(int64_t seed) {
@@ -266,34 +276,130 @@ int qt_num_codebooks(const struct qt_context * q) {
     return q->pt.num_code_groups;
 }
 
-// Batch worker: owns the long lived TtsEngine and the GPU hot loop.
-// Sleeps until work arrives, then admits queued jobs into free slots
-// between frames and steps the batch until both the queue and the
-// slots drain. Every GPU touching phase runs under gpu_mu so a voice
-// extraction or another entry can slip between frames from its own
-// thread. Retired jobs get their done flag under mu and a cv_done
-// broadcast so the blocked qt_synthesize callers wake.
-static void qt_batch_worker(qt_context * q) {
+// Reference extraction body, run by the worker. Loads the speaker
+// encoder on first use, runs the speaker embedding and the RVQ encode,
+// then copies both into the malloc owned buffers the ABI hands to the
+// caller. Every failure leaves job->out empty and its diagnostic in the
+// worker thread local slot, which the entry replays for the caller.
+static qt_status qt_extract_voice_ref_run(qt_context * q, RefJob * job) {
+    try {
+        // Lazy residency: the first reference audio request pays the
+        // weight load once, mirroring the qt_synthesize ref_audio path.
+        if (!q->pt.spk_enc_loaded) {
+            Timer t_spk_load;
+            if (!speaker_encoder_weights_load(&q->pt.speaker_encoder, q->pt.gguf_talker, q->pt.backend) ||
+                q->pt.speaker_encoder.weight_buf == NULL) {
+                q->pt.has_speaker_encoder = false;
+                qt_set_error("qt_extract_voice_ref: speaker encoder load failed");
+                return QT_STATUS_GENERATE_FAILED;
+            }
+            q->pt.spk_enc_loaded = true;
+            qt_log(QT_LOG_INFO, "[Qwen] Speaker encoder lazy loaded in %.0f ms", t_spk_load.ms());
+        }
+
+        std::vector<float> emb;
+        if (!speaker_encoder_extract(&q->pt.speaker_encoder, q->pt.sched, job->audio, job->n_samples, emb)) {
+            qt_set_error("qt_extract_voice_ref: speaker embedding extraction failed");
+            return QT_STATUS_GENERATE_FAILED;
+        }
+        if ((int) emb.size() != q->pt.talker.hidden_size) {
+            qt_set_error("qt_extract_voice_ref: speaker embedding size %zu mismatches talker hidden %d", emb.size(),
+                         q->pt.talker.hidden_size);
+            return QT_STATUS_GENERATE_FAILED;
+        }
+
+        const int            aligned_n = (job->n_samples / TOKENIZER_HOP_LENGTH) * TOKENIZER_HOP_LENGTH;
+        const int            ref_T     = aligned_n / TOKENIZER_HOP_LENGTH;
+        std::vector<int32_t> codes     = pipeline_codec_encode(&q->pt.codec, job->audio, aligned_n);
+        if (codes.empty()) {
+            qt_set_error("qt_extract_voice_ref: pipeline_codec_encode returned empty codes");
+            return QT_STATUS_GENERATE_FAILED;
+        }
+        const int num_codebooks = q->pt.num_code_groups;
+        if ((codes.size() % (size_t) num_codebooks) != 0) {
+            qt_set_error("qt_extract_voice_ref: encoded code count %zu is not divisible by %d", codes.size(),
+                         num_codebooks);
+            return QT_STATUS_GENERATE_FAILED;
+        }
+        const int codes_T = (int) (codes.size() / (size_t) num_codebooks);
+        if (codes_T != ref_T) {
+            qt_set_error("qt_extract_voice_ref: encoded frame count %d mismatches aligned frame count %d", codes_T,
+                         ref_T);
+            return QT_STATUS_GENERATE_FAILED;
+        }
+
+        const size_t emb_bytes   = emb.size() * sizeof(float);
+        const size_t codes_bytes = codes.size() * sizeof(int32_t);
+        float *      emb_copy    = (float *) std::malloc(emb_bytes);
+        int32_t *    codes_copy  = (int32_t *) std::malloc(codes_bytes);
+        if (!emb_copy || !codes_copy) {
+            std::free(emb_copy);
+            std::free(codes_copy);
+            qt_set_error("qt_extract_voice_ref: malloc failed for %zu emb bytes and %zu code bytes", emb_bytes,
+                         codes_bytes);
+            return QT_STATUS_OOM;
+        }
+        std::memcpy(emb_copy, emb.data(), emb_bytes);
+        std::memcpy(codes_copy, codes.data(), codes_bytes);
+
+        job->out->ref_spk_emb   = emb_copy;
+        job->out->ref_spk_dim   = (int) emb.size();
+        job->out->ref_codes     = codes_copy;
+        job->out->ref_T         = ref_T;
+        job->out->num_codebooks = num_codebooks;
+
+        qt_log(QT_LOG_INFO, "[Qwen] Extracted voice ref: spk_dim=%d K=%d T=%d (%d/%d samples)", job->out->ref_spk_dim,
+               job->out->num_codebooks, job->out->ref_T, aligned_n, job->n_samples);
+        return QT_STATUS_OK;
+    } catch (const std::bad_alloc &) {
+        qt_set_error("qt_extract_voice_ref: out of memory");
+        qt_voice_ref_free(job->out);
+        return QT_STATUS_OOM;
+    } catch (const std::exception & e) {
+        qt_set_error("%s", e.what());
+        qt_log(QT_LOG_ERROR, "[Qwen] %s", e.what());
+        qt_voice_ref_free(job->out);
+        return QT_STATUS_GENERATE_FAILED;
+    }
+}
+
+// Compute worker: the single thread that touches the backend on this
+// handle. Sleeps until work arrives, then drains pending extractions at
+// a frame boundary, admits queued jobs into free slots and steps the
+// batch until both queues and the slots drain. Retired jobs get their
+// done flag under mu and a cv_done broadcast so the blocked callers
+// wake.
+static void qt_worker(qt_context * q) {
     TtsEngine *                  e = tts_engine_new(&q->pt, &q->tok);
     std::vector<TtsJob *>        retired;
     std::unique_lock<std::mutex> lk(q->mu);
     for (;;) {
-        q->cv_work.wait(lk, [&] { return q->stop || !q->queue.empty(); });
-        if (q->stop && q->queue.empty()) {
+        q->cv_work.wait(lk, [&] { return q->stop || !q->queue.empty() || !q->ref_queue.empty(); });
+        if (q->stop && q->queue.empty() && q->ref_queue.empty()) {
             break;
         }
-        while (!q->queue.empty() || tts_engine_active(e) > 0) {
+        while (!q->queue.empty() || !q->ref_queue.empty() || tts_engine_active(e) > 0) {
+            // Extractions run between two frames: they stall the active
+            // slots for one extraction and never split a frame.
+            while (!q->ref_queue.empty()) {
+                RefJob * r = q->ref_queue.front();
+                q->ref_queue.pop_front();
+                lk.unlock();
+                r->status = qt_extract_voice_ref_run(q, r);
+                if (r->status != QT_STATUS_OK) {
+                    r->error = qt_last_error();
+                }
+                lk.lock();
+                r->done = true;
+                q->cv_done.notify_all();
+            }
             // Admit up to max_batch: joins happen at frame boundaries,
             // each one stalls the active slots for one prefill.
-            while (!q->queue.empty() && tts_engine_active(e) < q->max_batch) {
+            while (!q->queue.empty() && tts_engine_active(e) < q->pt.max_batch) {
                 TtsJob * j = q->queue.front();
                 q->queue.pop_front();
                 lk.unlock();
-                bool admitted;
-                {
-                    std::lock_guard<std::mutex> gpu(q->gpu_mu);
-                    admitted = tts_engine_admit(e, j);
-                }
+                const bool admitted = tts_engine_admit(e, j);
                 lk.lock();
                 if (!admitted) {
                     j->done = true;
@@ -301,14 +407,11 @@ static void qt_batch_worker(qt_context * q) {
                 }
             }
             if (tts_engine_active(e) == 0) {
-                break;
+                continue;
             }
             lk.unlock();
             retired.clear();
-            {
-                std::lock_guard<std::mutex> gpu(q->gpu_mu);
-                tts_engine_step(e, &retired);
-            }
+            tts_engine_step(e, &retired);
             lk.lock();
             for (TtsJob * j : retired) {
                 j->done = true;
@@ -348,7 +451,6 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
     // (BackendPair, PipelineTTS) are zero-init, std containers in
     // BPETokenizer construct empty.
     qt_context * q = new qt_context();
-    q->max_batch   = max_batch;
 
     // The load chain runs inside a try block. Any failure deep in the
     // GGUF reader, the codec load or the LM weight load throws via
@@ -385,12 +487,10 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
         return nullptr;
     }
 
-    // Batch mode: one worker thread owns the long lived engine and the
-    // GPU hot loop; qt_synthesize enqueues and blocks on completion.
-    if (q->max_batch > 1) {
-        q->worker = std::thread(qt_batch_worker, q);
-        qt_log(QT_LOG_INFO, "[Qwen] Batch scheduler started (max_batch=%d)", q->max_batch);
-    }
+    // One worker thread owns the long lived engine and every backend
+    // compute; the public entries enqueue and block on completion.
+    q->worker = std::thread(qt_worker, q);
+    qt_log(QT_LOG_INFO, "[Qwen] Compute worker started (max_batch=%d)", max_batch);
 
     return q;
 }
@@ -460,89 +560,30 @@ enum qt_status qt_extract_voice_ref(struct qt_context *   q,
         return QT_STATUS_GENERATE_FAILED;
     }
 
-    try {
-        // Serialize against the batch worker and any concurrent
-        // synthesize: the extraction slips between two engine frames.
-        std::lock_guard<std::mutex> gpu(q->gpu_mu);
-
-        // Lazy residency: the first reference audio request pays the
-        // weight load once, mirroring the qt_synthesize ref_audio path.
-        if (!q->pt.spk_enc_loaded) {
-            Timer t_spk_load;
-            if (!speaker_encoder_weights_load(&q->pt.speaker_encoder, q->pt.gguf_talker, q->pt.backend) ||
-                q->pt.speaker_encoder.weight_buf == NULL) {
-                q->pt.has_speaker_encoder = false;
-                qt_set_error("qt_extract_voice_ref: speaker encoder load failed");
-                return QT_STATUS_GENERATE_FAILED;
-            }
-            q->pt.spk_enc_loaded = true;
-            qt_log(QT_LOG_INFO, "[Qwen] Speaker encoder lazy loaded in %.0f ms", t_spk_load.ms());
-        }
-
-        std::vector<float> emb;
-        if (!speaker_encoder_extract(&q->pt.speaker_encoder, q->pt.sched, ref_audio_24k, ref_n_samples, emb)) {
-            qt_set_error("qt_extract_voice_ref: speaker embedding extraction failed");
-            return QT_STATUS_GENERATE_FAILED;
-        }
-        if ((int) emb.size() != q->pt.talker.hidden_size) {
-            qt_set_error("qt_extract_voice_ref: speaker embedding size %zu mismatches talker hidden %d", emb.size(),
-                         q->pt.talker.hidden_size);
-            return QT_STATUS_GENERATE_FAILED;
-        }
-
-        const int            aligned_n = (ref_n_samples / TOKENIZER_HOP_LENGTH) * TOKENIZER_HOP_LENGTH;
-        const int            ref_T     = aligned_n / TOKENIZER_HOP_LENGTH;
-        std::vector<int32_t> codes     = pipeline_codec_encode(&q->pt.codec, ref_audio_24k, aligned_n);
-        if (codes.empty()) {
-            qt_set_error("qt_extract_voice_ref: pipeline_codec_encode returned empty codes");
-            return QT_STATUS_GENERATE_FAILED;
-        }
-        const int num_codebooks = q->pt.num_code_groups;
-        if ((codes.size() % (size_t) num_codebooks) != 0) {
-            qt_set_error("qt_extract_voice_ref: encoded code count %zu is not divisible by %d", codes.size(),
-                         num_codebooks);
-            return QT_STATUS_GENERATE_FAILED;
-        }
-        const int codes_T = (int) (codes.size() / (size_t) num_codebooks);
-        if (codes_T != ref_T) {
-            qt_set_error("qt_extract_voice_ref: encoded frame count %d mismatches aligned frame count %d", codes_T,
-                         ref_T);
-            return QT_STATUS_GENERATE_FAILED;
-        }
-
-        const size_t emb_bytes   = emb.size() * sizeof(float);
-        const size_t codes_bytes = codes.size() * sizeof(int32_t);
-        float *      emb_copy    = (float *) std::malloc(emb_bytes);
-        int32_t *    codes_copy  = (int32_t *) std::malloc(codes_bytes);
-        if (!emb_copy || !codes_copy) {
-            std::free(emb_copy);
-            std::free(codes_copy);
-            qt_set_error("qt_extract_voice_ref: malloc failed for %zu emb bytes and %zu code bytes", emb_bytes,
-                         codes_bytes);
-            return QT_STATUS_OOM;
-        }
-        std::memcpy(emb_copy, emb.data(), emb_bytes);
-        std::memcpy(codes_copy, codes.data(), codes_bytes);
-
-        out->ref_spk_emb   = emb_copy;
-        out->ref_spk_dim   = (int) emb.size();
-        out->ref_codes     = codes_copy;
-        out->ref_T         = ref_T;
-        out->num_codebooks = num_codebooks;
-
-        qt_log(QT_LOG_INFO, "[Qwen] Extracted voice ref: spk_dim=%d K=%d T=%d (%d/%d samples)", out->ref_spk_dim,
-               out->num_codebooks, out->ref_T, aligned_n, ref_n_samples);
-        return QT_STATUS_OK;
-    } catch (const std::bad_alloc &) {
-        qt_set_error("qt_extract_voice_ref: out of memory");
-        qt_voice_ref_free(out);
-        return QT_STATUS_OOM;
-    } catch (const std::exception & e) {
-        qt_set_error("%s", e.what());
-        qt_log(QT_LOG_ERROR, "[Qwen] %s", e.what());
-        qt_voice_ref_free(out);
-        return QT_STATUS_GENERATE_FAILED;
+    // Enqueue and block until the worker completes the extraction. The
+    // worker is the only thread that touches the backend, so the
+    // extraction lands between two engine frames. qt_last_error is
+    // thread local: replay the worker side message into this caller's
+    // slot so the errno style contract holds across the thread hop.
+    RefJob job;
+    job.audio     = ref_audio_24k;
+    job.n_samples = ref_n_samples;
+    job.out       = out;
+    job.status    = QT_STATUS_OK;
+    job.done      = false;
+    {
+        std::lock_guard<std::mutex> lk(q->mu);
+        q->ref_queue.push_back(&job);
     }
+    q->cv_work.notify_all();
+    {
+        std::unique_lock<std::mutex> lk(q->mu);
+        q->cv_done.wait(lk, [&] { return job.done; });
+    }
+    if (job.status != QT_STATUS_OK && !job.error.empty()) {
+        qt_set_error("%s", job.error.c_str());
+    }
+    return job.status;
 }
 
 enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params * params, struct qt_audio * out) {
@@ -645,18 +686,10 @@ enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params *
     try {
         const int64_t resolved_seed = qt_resolve_seed(params->seed);
 
-        if (q->max_batch <= 1) {
-            // Single sequence mode: run synchronously on the calling
-            // thread under gpu_mu, so concurrent callers serialize FIFO
-            // and callbacks fire on their own caller's thread.
-            std::lock_guard<std::mutex> gpu(q->gpu_mu);
-            return pipeline_tts_synthesize(&q->pt, &q->tok, params, resolved_seed, out);
-        }
-
-        // Batch mode: enqueue and block until the worker retires the
-        // job. qt_last_error is thread local, so the engine captured
-        // the worker side message into job.error at retirement; replay
-        // it into this caller's slot so the errno style contract holds
+        // Enqueue and block until the worker retires the job.
+        // qt_last_error is thread local, so the engine captured the
+        // worker side message into job.error at retirement; replay it
+        // into this caller's slot so the errno style contract holds
         // across the thread hop.
         TtsJob job;
         job.params        = params;

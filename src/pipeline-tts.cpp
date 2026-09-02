@@ -435,7 +435,7 @@ static bool fill_qt_audio(const std::vector<float> & audio, qt_audio * out) {
     const size_t bytes = n * sizeof(float);
     float *      buf   = (float *) std::malloc(bytes > 0 ? bytes : 1);
     if (!buf) {
-        qt_set_error("pipeline_tts_synthesize: malloc failed for %zu samples", n);
+        qt_set_error("fill_qt_audio: malloc failed for %zu samples", n);
         return false;
     }
     if (n > 0) {
@@ -759,14 +759,14 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
     // Raw waveform and pre-encoded latents are mutually exclusive: the
     // caller is told immediately rather than picking a winner silently.
     if (has_ref_audio && (has_lat_spk || has_lat_codes)) {
-        qt_set_error("pipeline_tts_synthesize: ref_audio_24k and ref_spk_emb / ref_codes are mutually exclusive");
+        qt_set_error("tts_engine_admit: ref_audio_24k and ref_spk_emb / ref_codes are mutually exclusive");
         qt_log(QT_LOG_ERROR, "[Pipeline] ref_audio_24k and ref_spk_emb / ref_codes are mutually exclusive");
         return tts_admit_fail(job, QT_STATUS_INVALID_PARAMS);
     }
     // Latent ICL codes ride on top of the speaker embedding and need the
     // transcript, mirroring the raw path where mode B implies mode A.
     if (has_lat_codes && (!has_lat_spk || ref_text.empty())) {
-        qt_set_error("pipeline_tts_synthesize: ref_codes requires ref_spk_emb and ref_text");
+        qt_set_error("tts_engine_admit: ref_codes requires ref_spk_emb and ref_text");
         qt_log(QT_LOG_ERROR, "[Pipeline] ref_codes requires ref_spk_emb and ref_text");
         return tts_admit_fail(job, QT_STATUS_INVALID_PARAMS);
     }
@@ -779,7 +779,7 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
     const float *      ref_spk_emb_ptr = NULL;
     if (has_lat_spk) {
         if (lat_spk_dim != pt->talker.hidden_size) {
-            qt_set_error("pipeline_tts_synthesize: ref_spk_dim %d mismatches talker hidden %d", lat_spk_dim,
+            qt_set_error("tts_engine_admit: ref_spk_dim %d mismatches talker hidden %d", lat_spk_dim,
                          pt->talker.hidden_size);
             qt_log(QT_LOG_ERROR, "[Pipeline] ref_spk_dim %d mismatches talker hidden %d", lat_spk_dim,
                    pt->talker.hidden_size);
@@ -789,7 +789,7 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
         qt_log(QT_LOG_INFO, "[Pipeline] Latent speaker embedding: %d values", lat_spk_dim);
     } else if (has_ref_audio) {
         if (!pt->has_speaker_encoder) {
-            qt_set_error("pipeline_tts_synthesize: --ref-wav requires a model with a speaker encoder (Base only)");
+            qt_set_error("tts_engine_admit: --ref-wav requires a model with a speaker encoder (Base only)");
             qt_log(QT_LOG_ERROR, "[Pipeline] --ref-wav requires a model with a speaker encoder (Base only)");
             return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
         }
@@ -800,7 +800,7 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
             if (!speaker_encoder_weights_load(&pt->speaker_encoder, pt->gguf_talker, pt->backend) ||
                 pt->speaker_encoder.weight_buf == NULL) {
                 pt->has_speaker_encoder = false;
-                qt_set_error("pipeline_tts_synthesize: speaker encoder load failed");
+                qt_set_error("tts_engine_admit: speaker encoder load failed");
                 qt_log(QT_LOG_ERROR, "[Pipeline] speaker encoder load failed");
                 return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
             }
@@ -812,8 +812,8 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
             return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
         }
         if ((int) ref_spk_emb.size() != pt->talker.hidden_size) {
-            qt_set_error("pipeline_tts_synthesize: speaker embedding size %zu mismatches talker hidden %d",
-                         ref_spk_emb.size(), pt->talker.hidden_size);
+            qt_set_error("tts_engine_admit: speaker embedding size %zu mismatches talker hidden %d", ref_spk_emb.size(),
+                         pt->talker.hidden_size);
             qt_log(QT_LOG_ERROR, "[Pipeline] speaker embedding size %zu mismatches talker hidden %d",
                    ref_spk_emb.size(), pt->talker.hidden_size);
             return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
@@ -853,7 +853,7 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
         qt_log(QT_LOG_INFO, "[Pipeline] Latent ICL ref_codes: %d frames at 12.5 Hz", s.ref_codes_T);
     } else if (!ref_text.empty()) {
         if (!has_ref_audio) {
-            qt_set_error("pipeline_tts_synthesize: ref_text requires ref_audio_24k or latent ref_codes");
+            qt_set_error("tts_engine_admit: ref_text requires ref_audio_24k or latent ref_codes");
             qt_log(QT_LOG_ERROR, "[Pipeline] ref_text requires ref_audio_24k or latent ref_codes");
             e->slots.pop_back();
             return tts_admit_fail(job, QT_STATUS_INVALID_PARAMS);
@@ -861,7 +861,7 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
         // The codec hop is 1920 samples at 24 kHz so n_samples must be
         // a multiple of 1920. Truncate to the nearest hop boundary.
         if (params->ref_n_samples < TOKENIZER_HOP_LENGTH) {
-            qt_set_error("pipeline_tts_synthesize: ref_wav too short for ICL (%d samples)", params->ref_n_samples);
+            qt_set_error("tts_engine_admit: ref_wav too short for ICL (%d samples)", params->ref_n_samples);
             qt_log(QT_LOG_ERROR, "[Pipeline] ref_wav too short for ICL (%d samples)", params->ref_n_samples);
             e->slots.pop_back();
             return tts_admit_fail(job, QT_STATUS_INVALID_PARAMS);
@@ -869,7 +869,7 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
         int aligned_T     = (params->ref_n_samples / TOKENIZER_HOP_LENGTH) * TOKENIZER_HOP_LENGTH;
         s.ref_codes_store = pipeline_codec_encode(&pt->codec, params->ref_audio_24k, aligned_T, params->dump_dir);
         if (s.ref_codes_store.empty()) {
-            qt_set_error("pipeline_tts_synthesize: pipeline_codec_encode returned empty codes");
+            qt_set_error("tts_engine_admit: pipeline_codec_encode returned empty codes");
             qt_log(QT_LOG_ERROR, "[Pipeline] pipeline_codec_encode returned empty codes");
             e->slots.pop_back();
             return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
@@ -929,7 +929,7 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
     // generated decode exactly.
     if (s.streaming) {
         if (!tts_engine_codec_admit(e, &s)) {
-            qt_set_error("pipeline_tts_synthesize: codec stream lane admit failed");
+            qt_set_error("tts_engine_admit: codec stream lane admit failed");
             e->slots.pop_back();
             return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
         }
@@ -1049,7 +1049,7 @@ static void tts_slot_complete(TtsEngine * e, TtsSlot & s) {
                 codec_chunked_decode(&pt->codec, codes_kt.data(), num_codebooks, T_dec, chunk_frames, left_ctx_frames);
             s.perf.codec_ms += t_codec.ms();
             if (audio.empty()) {
-                qt_set_error("pipeline_tts_synthesize: codec decode returned no audio");
+                qt_set_error("tts_slot_complete: codec decode returned no audio");
                 qt_log(QT_LOG_ERROR, "[Pipeline] codec decode returned no audio");
                 st = QT_STATUS_GENERATE_FAILED;
             } else {
@@ -1118,7 +1118,7 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
         if (!talker_forward_decode(&pt->talker, &pt->talker_kv, pt->backend, pt->talker_decode_graphs,
                                    pt->hidden_bridge, ids.data(), pt->code_predictor.codec_embedding.data(), n_acoustic,
                                    overlays.data(), N_dec, pt->use_flash_attn, pt->clamp_fp16, any_dump, &fw)) {
-            qt_set_error("pipeline_tts_synthesize: talker decode failed");
+            qt_set_error("tts_engine_step: talker decode failed");
             for (TtsSlot & s : e->slots) {
                 s.finished   = true;
                 s.fin_status = QT_STATUS_GENERATE_FAILED;
@@ -1178,7 +1178,7 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
         s.perf.host_ms += t_host.ms();
         s.subseq_counter++;
         if (c0 < 0) {
-            qt_set_error("pipeline_tts_synthesize: c0 sample returned no candidate");
+            qt_set_error("tts_engine_step: c0 sample returned no candidate");
             qt_log(QT_LOG_ERROR, "[Pipeline] c0 sample returned no candidate");
             s.finished   = true;
             s.fin_status = QT_STATUS_GENERATE_FAILED;
@@ -1214,7 +1214,7 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
         CodePredictorOutput cp;
 
         if (!pipeline_tts_cp_graphs_ensure(pt, N)) {
-            qt_set_error("pipeline_tts_synthesize: code predictor graph build failed (N=%d)", N);
+            qt_set_error("tts_engine_step: code predictor graph build failed (N=%d)", N);
             for (TtsSlot & s : e->slots) {
                 s.finished   = true;
                 s.fin_status = QT_STATUS_GENERATE_FAILED;
@@ -1388,7 +1388,7 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
             }
         }
         if (!ok) {
-            qt_set_error("pipeline_tts_synthesize: streaming codec decode failed");
+            qt_set_error("tts_engine_step: streaming codec decode failed");
             qt_log(QT_LOG_ERROR, "[Pipeline] streaming codec decode failed");
             for (TtsSlot & s : e->slots) {
                 if (s.codec_set >= 0) {
@@ -1435,25 +1435,4 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
         }
         e->slots.pop_back();
     }
-}
-
-qt_status pipeline_tts_synthesize(PipelineTTS *                pt,
-                                  BPETokenizer *               tok,
-                                  const struct qt_tts_params * params,
-                                  int64_t                      resolved_seed,
-                                  struct qt_audio *            out) {
-    TtsEngine * e = tts_engine_new(pt, tok);
-    TtsJob      job;
-    job.params        = params;
-    job.resolved_seed = resolved_seed;
-    job.out           = out;
-    job.status        = QT_STATUS_OK;
-    job.done          = false;
-    if (tts_engine_admit(e, &job)) {
-        while (tts_engine_active(e) > 0) {
-            tts_engine_step(e, NULL);
-        }
-    }
-    tts_engine_free(e);
-    return job.status;
 }

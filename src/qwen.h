@@ -132,14 +132,14 @@ struct qt_init_params {
 
     // Maximum number of concurrent synthesis requests batched
     // on the GPU. 0 and 1 select the single sequence behavior; values
-    // above 1 size the KV cache sets accordingly and start an internal
-    // worker thread that coalesces concurrent qt_synthesize calls into
-    // batched decode steps, queueing FIFO beyond max_batch. With
-    // max_batch > 1 the on_chunk and cancel callbacks of every request
-    // are invoked from that worker thread, not from the calling
-    // thread; callbacks must be safe to run there and must not call
-    // back into the qwen_* API. qt_synthesize itself stays blocking
-    // and thread safe in both modes.
+    // above 1 size the KV cache sets accordingly and let the internal
+    // worker thread coalesce concurrent qt_synthesize calls into
+    // batched decode steps, queueing FIFO beyond max_batch. That worker
+    // owns every backend compute on the handle whatever the width, so
+    // the on_chunk and cancel callbacks of every request are invoked
+    // from it and never from the calling thread; callbacks must be safe
+    // to run there and must not call back into the qwen_* API.
+    // qt_synthesize itself stays blocking and thread safe.
     int max_batch;
 
     // Chunk width of the buffered codec decode, in seconds of
@@ -327,12 +327,11 @@ struct qt_tts_params {
     // the streaming pipeline: audio chunks emit through on_chunk and
     // `out` stays empty on success. on_chunk NULL keeps the buffered
     // path. The last chunk on EOS or max_new flushes whatever frames
-    // remain. With qt_init_params.max_batch > 1 the callback runs on
-    // the internal batch worker thread, not the qt_synthesize caller
-    // thread: it must be safe there, must not call back into the
-    // qwen_* API, and a blocking body stalls every batched request, so
-    // hand the samples to the consumer thread through a queue instead
-    // of blocking.
+    // remain. The callback runs on the internal compute worker thread,
+    // not the qt_synthesize caller thread: it must be safe there, must
+    // not call back into the qwen_* API, and a blocking body stalls
+    // every batched request, so hand the samples to the consumer thread
+    // through a queue instead of blocking.
     qt_audio_chunk_cb on_chunk;
     void *            on_chunk_user_data;
 
@@ -364,7 +363,7 @@ QT_API int qt_num_codebooks(const struct qt_context * q);
 
 // Run the full TTS synthesis. Validates the params against the loaded
 // model_type (the seven base / custom_voice / voice_design rules),
-// resolves the seed, hands off to pipeline_tts_synthesize and fills
+// resolves the seed, hands the request to the compute worker and fills
 // `out` with mono float PCM at 24 kHz in buffered mode.
 // In streaming mode (params->on_chunk != NULL), audio is emitted
 // through the callback and `out` stays empty. Returns QT_STATUS_OK on
