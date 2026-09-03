@@ -27,9 +27,9 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "qt-error.h"
 #include "weight-ctx.h"
 
-#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -84,17 +84,17 @@ static bool quant_encode_load(QwenQuantizerEncode * q, const GGUFModel & gf, ggm
     }
 
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[EncQuantizer] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[EncQuantizer] FATAL: backend allocation failed");
         return false;
     }
     q->weight_ctx = wctx.ctx;
     q->weight_buf = wctx.buffer;
 
-    fprintf(stderr,
-            "[EncQuantizer] Loaded: %d codebooks (%d semantic + %d acoustic), %d entries x %d dim, "
-            "hidden %d, weights %.1f MB\n",
-            QUANT_ENC_TOTAL, QUANT_ENC_NUM_SEMANTIC, QUANT_ENC_NUM_ACOUSTIC, q->codebook_size, q->codebook_dim,
-            q->hidden_size, (float) ggml_backend_buffer_get_size(q->weight_buf) / (1024.0f * 1024.0f));
+    qt_log(QT_LOG_INFO,
+           "[EncQuantizer] Loaded: %d codebooks (%d semantic + %d acoustic), %d entries x %d dim, "
+           "hidden %d, weights %.1f MB",
+           QUANT_ENC_TOTAL, QUANT_ENC_NUM_SEMANTIC, QUANT_ENC_NUM_ACOUSTIC, q->codebook_size, q->codebook_dim,
+           q->hidden_size, (float) ggml_backend_buffer_get_size(q->weight_buf) / (1024.0f * 1024.0f));
     return true;
 }
 

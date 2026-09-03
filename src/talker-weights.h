@@ -35,10 +35,10 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "qt-error.h"
 #include "weight-ctx.h"
 
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -117,8 +117,8 @@ static bool talker_weights_load(TalkerWeights * tw, const GGUFModel & gf, ggml_b
     }
 
     if (tw->num_hidden_layers <= 0 || tw->hidden_size <= 0) {
-        fprintf(stderr, "[Talker] FATAL: invalid hyperparameters in GGUF (layers=%d hidden=%d)\n",
-                tw->num_hidden_layers, tw->hidden_size);
+        qt_log(QT_LOG_ERROR, "[Talker] FATAL: invalid hyperparameters in GGUF (layers=%d hidden=%d)",
+               tw->num_hidden_layers, tw->hidden_size);
         return false;
     }
 
@@ -171,18 +171,18 @@ static bool talker_weights_load(TalkerWeights * tw, const GGUFModel & gf, ggml_b
     }
 
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[Talker] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[Talker] FATAL: backend allocation failed");
         return false;
     }
     tw->weight_ctx = wctx.ctx;
     tw->weight_buf = wctx.buffer;
 
-    fprintf(stderr,
-            "[Talker] Loaded: %d layers, hidden %d, heads %d/%d, head_dim %d, "
-            "FFN %d, RoPE theta %.0f, mrope sections [%d,%d,%d] interleaved=%d\n",
-            tw->num_hidden_layers, tw->hidden_size, tw->num_attention_heads, tw->num_key_value_heads, tw->head_dim,
-            tw->intermediate_size, (double) tw->rope_theta, tw->mrope_section_t, tw->mrope_section_h,
-            tw->mrope_section_w, (int) tw->mrope_interleaved);
+    qt_log(QT_LOG_INFO,
+           "[Talker] Loaded: %d layers, hidden %d, heads %d/%d, head_dim %d, "
+           "FFN %d, RoPE theta %.0f, mrope sections [%d,%d,%d] interleaved=%d",
+           tw->num_hidden_layers, tw->hidden_size, tw->num_attention_heads, tw->num_key_value_heads, tw->head_dim,
+           tw->intermediate_size, (double) tw->rope_theta, tw->mrope_section_t, tw->mrope_section_h,
+           tw->mrope_section_w, (int) tw->mrope_interleaved);
     return true;
 }
 

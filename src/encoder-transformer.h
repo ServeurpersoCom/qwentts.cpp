@@ -21,11 +21,11 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "qt-error.h"
 #include "weight-ctx.h"
 
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -81,7 +81,7 @@ static bool enc_trans_load(QwenEncoderTransformer * tr, const GGUFModel & gf, gg
     tr->norm_eps            = gf_get_f32(gf, "qwen3-tts-tokenizer.encoder.norm_eps");
 
     if (num_layers == 0 || num_layers > (uint32_t) ENC_TRANS_MAX_LAYERS) {
-        fprintf(stderr, "[EncTransformer] FATAL: invalid layer count %u (max %d)\n", num_layers, ENC_TRANS_MAX_LAYERS);
+        qt_log(QT_LOG_ERROR, "[EncTransformer] FATAL: invalid layer count %u (max %d)", num_layers, ENC_TRANS_MAX_LAYERS);
         return false;
     }
 
@@ -110,17 +110,17 @@ static bool enc_trans_load(QwenEncoderTransformer * tr, const GGUFModel & gf, gg
     }
 
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[EncTransformer] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[EncTransformer] FATAL: backend allocation failed");
         return false;
     }
     tr->weight_ctx = wctx.ctx;
     tr->weight_buf = wctx.buffer;
 
-    fprintf(stderr,
-            "[EncTransformer] Loaded: %d layers, hidden %d, heads %d/%d, head_dim %d, "
-            "FFN %d, RoPE theta %.0f\n",
-            tr->num_layers, tr->hidden_size, tr->num_attention_heads, tr->num_kv_heads, tr->head_dim,
-            tr->intermediate_size, tr->rope_theta);
+    qt_log(QT_LOG_INFO,
+           "[EncTransformer] Loaded: %d layers, hidden %d, heads %d/%d, head_dim %d, "
+           "FFN %d, RoPE theta %.0f",
+           tr->num_layers, tr->hidden_size, tr->num_attention_heads, tr->num_kv_heads, tr->head_dim,
+           tr->intermediate_size, tr->rope_theta);
     return true;
 }
 

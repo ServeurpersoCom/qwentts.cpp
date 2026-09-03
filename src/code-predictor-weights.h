@@ -29,7 +29,6 @@
 #include "weight-ctx.h"
 
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -79,14 +78,14 @@ static bool code_predictor_weights_load(CodePredictorWeights * cw, const GGUFMod
 
     int num_code_groups = (int) gf_get_u32(gf, "qwen3-tts.num_code_groups");
     if (num_code_groups <= 1) {
-        fprintf(stderr, "[CodePredictor] FATAL: invalid num_code_groups=%d\n", num_code_groups);
+        qt_log(QT_LOG_ERROR, "[CodePredictor] FATAL: invalid num_code_groups=%d", num_code_groups);
         return false;
     }
     cw->num_acoustic_codebooks = num_code_groups - 1;
 
     if (cw->num_hidden_layers <= 0 || cw->hidden_size <= 0) {
-        fprintf(stderr, "[CodePredictor] FATAL: invalid hyperparameters (layers=%d hidden=%d)\n", cw->num_hidden_layers,
-                cw->hidden_size);
+        qt_log(QT_LOG_ERROR, "[CodePredictor] FATAL: invalid hyperparameters (layers=%d hidden=%d)", cw->num_hidden_layers,
+               cw->hidden_size);
         return false;
     }
 
@@ -151,18 +150,18 @@ static bool code_predictor_weights_load(CodePredictorWeights * cw, const GGUFMod
     }
 
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[CodePredictor] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[CodePredictor] FATAL: backend allocation failed");
         return false;
     }
     cw->weight_ctx = wctx.ctx;
     cw->weight_buf = wctx.buffer;
 
-    fprintf(stderr,
-            "[CodePredictor] Loaded: %d layers, hidden %d, heads %d/%d, head_dim %d, "
-            "FFN %d, RoPE theta %.0f, %d acoustic codebooks (vocab %d each), mtp_proj %s\n",
-            cw->num_hidden_layers, cw->hidden_size, cw->num_attention_heads, cw->num_key_value_heads, cw->head_dim,
-            cw->intermediate_size, (double) cw->rope_theta, cw->num_acoustic_codebooks, cw->vocab_size,
-            cw->mtp_proj_w ? "linear" : "identity");
+    qt_log(QT_LOG_INFO,
+           "[CodePredictor] Loaded: %d layers, hidden %d, heads %d/%d, head_dim %d, "
+           "FFN %d, RoPE theta %.0f, %d acoustic codebooks (vocab %d each), mtp_proj %s",
+           cw->num_hidden_layers, cw->hidden_size, cw->num_attention_heads, cw->num_key_value_heads, cw->head_dim,
+           cw->intermediate_size, (double) cw->rope_theta, cw->num_acoustic_codebooks, cw->vocab_size,
+           cw->mtp_proj_w ? "linear" : "identity");
     return true;
 }
 

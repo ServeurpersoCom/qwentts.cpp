@@ -47,7 +47,6 @@
 
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -388,7 +387,7 @@ static bool code_predictor_frame_graph_build(const CodePredictorWeights * cw,
     struct ggml_init_params gp = { bytes, NULL, true };
     cp->ctx                    = ggml_init(gp);
     if (!cp->ctx) {
-        fprintf(stderr, "[CodePredictor] FATAL: frame graph ctx allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[CodePredictor] FATAL: frame graph ctx allocation failed");
         return false;
     }
     struct ggml_cgraph * gf = ggml_new_graph_custom(cp->ctx, max_nodes, false);
@@ -406,7 +405,7 @@ static bool code_predictor_frame_graph_build(const CodePredictorWeights * cw,
 
     cp->galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     if (!cp->galloc || !ggml_gallocr_alloc_graph(cp->galloc, gf)) {
-        fprintf(stderr, "[CodePredictor] FATAL: frame graph allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[CodePredictor] FATAL: frame graph allocation failed");
         code_predictor_graph_free(cp);
         return false;
     }
@@ -445,7 +444,7 @@ static bool code_predictor_frame_step(const CodePredictorWeights * cw,
     sampler_inputs_upload(sp, temperature, seed, subseq_base, N);
 
     if (ggml_backend_graph_compute(backend, frame_graph->gf) != GGML_STATUS_SUCCESS) {
-        fprintf(stderr, "[CodePredictor] FATAL: frame graph compute failed\n");
+        qt_log(QT_LOG_ERROR, "[CodePredictor] FATAL: frame graph compute failed");
         return false;
     }
 
