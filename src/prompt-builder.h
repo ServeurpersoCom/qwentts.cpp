@@ -148,12 +148,12 @@ static bool project_text_ids_backend(PipelineTTS * pt, const int32_t * ids, int 
     struct ggml_tensor * h = ggml_get_rows(gctx, pt->talker.text_embedding, ids_in);
     ggml_set_name(h, "prompt_text_embeds");
     h = ggml_mul_mat(gctx, pt->talker.text_proj_fc1_w, h);
-    ggml_mul_mat_set_prec(h, GGML_PREC_F32);
+    ggml_prec_set_acc(h, GGML_PREC_F32);
     h = ggml_add(gctx, h, pt->talker.text_proj_fc1_b);
     h = ggml_silu(gctx, h);
 
     struct ggml_tensor * out = ggml_mul_mat(gctx, pt->talker.text_proj_fc2_w, h);
-    ggml_mul_mat_set_prec(out, GGML_PREC_F32);
+    ggml_prec_set_acc(out, GGML_PREC_F32);
     out = ggml_add(gctx, out, pt->talker.text_proj_fc2_b);
     ggml_set_name(out, "prompt_text_projection");
     ggml_set_output(out);

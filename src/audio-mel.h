@@ -203,8 +203,8 @@ static struct ggml_tensor * audio_mel_build_graph(struct ggml_context *  ctx,
     // [n_fft, n_freq] in ggml notation, so mul_mat returns [n_freq, T_frames].
     struct ggml_tensor * spec_re = ggml_mul_mat(ctx, dft_real, frames);
     struct ggml_tensor * spec_im = ggml_mul_mat(ctx, dft_imag, frames);
-    ggml_mul_mat_set_prec(spec_re, GGML_PREC_F32);
-    ggml_mul_mat_set_prec(spec_im, GGML_PREC_F32);
+    ggml_prec_set_acc(spec_re, GGML_PREC_F32);
+    ggml_prec_set_acc(spec_im, GGML_PREC_F32);
 
     // Magnitude with the same eps as torch upstream (1e-9 added to the
     // power, then sqrt). ggml_scale_bias does s*a + b so we add the eps
@@ -218,7 +218,7 @@ static struct ggml_tensor * audio_mel_build_graph(struct ggml_context *  ctx,
 
     // mel_basis [n_freq, n_mels] @ mag [n_freq, T_frames] -> [n_mels, T_frames].
     struct ggml_tensor * mel = ggml_mul_mat(ctx, mel_basis, mag);
-    ggml_mul_mat_set_prec(mel, GGML_PREC_F32);
+    ggml_prec_set_acc(mel, GGML_PREC_F32);
 
     // log(max(mel, 1e-5)). ggml has clamp + log primitives.
     mel = ggml_clamp(ctx, mel, 1e-5f, 1e30f);

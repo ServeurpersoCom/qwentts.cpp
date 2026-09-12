@@ -219,7 +219,7 @@ static struct ggml_tensor * talker_layer_forward(struct ggml_context * ctx,
     struct ggml_tensor * attn;
     if (use_flash_attn) {
         attn = ggml_flash_attn_ext(ctx, q_p, k_full, v_full, mask, scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
+        ggml_prec_set_acc(attn, GGML_PREC_F32);
     } else {
         attn = talker_attn_f32(ctx, q_p, k_full, v_full, mask, scale);
     }
@@ -579,7 +579,7 @@ static struct ggml_tensor * talker_layer_forward_batch(struct ggml_context * ctx
     struct ggml_tensor * attn;
     if (use_flash_attn) {
         attn = ggml_flash_attn_ext(ctx, q4, k_batch, v_batch, mask, scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
+        ggml_prec_set_acc(attn, GGML_PREC_F32);
     } else {
         attn = talker_attn_f32(ctx, q4, k_batch, v_batch, mask, scale);
     }

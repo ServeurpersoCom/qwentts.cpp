@@ -83,7 +83,7 @@ static struct ggml_tensor * spk_conv1d_same(struct ggml_context * ctx,
     // Weight reshape: [K, IC, OC] -> [K*IC, OC]. mul_mat returns [OC, T_out].
     struct ggml_tensor * w2d = ggml_reshape_2d(ctx, w, K * IC, OC);
     struct ggml_tensor * y   = ggml_mul_mat(ctx, w2d, col);
-    ggml_mul_mat_set_prec(y, GGML_PREC_F32);
+    ggml_prec_set_acc(y, GGML_PREC_F32);
 
     // Add bias broadcast over T_out. b is [out_c], reshape [out_c, 1].
     struct ggml_tensor * b2d = ggml_reshape_2d(ctx, b, OC, 1);
