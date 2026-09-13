@@ -139,8 +139,15 @@ int main(int argc, char ** argv) {
     // Voice registry: POST /v1/audio/voices stores a cloned voice either from a
     // WAV (server side extraction through qt_extract_voice_ref) or from
     // pre-extracted .spk / .rvq payloads. Re-registering a name replaces
-    // the previous entry.
+    // the previous entry. Only base models synthesize from a voice
+    // reference, so both payloads are refused on any other model type.
     be.register_voice = [q](const tts_voice_upload & up, std::string & err) -> bool {
+        const std::string mt = qt_model_type(q);
+        if (mt != "base") {
+            err = "voice registration is only valid for base models (loaded: " + mt + ")";
+            return false;
+        }
+
         voice_entry entry;
         entry.ref      = {};
         entry.ref_text = up.ref_text;

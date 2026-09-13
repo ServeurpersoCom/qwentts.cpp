@@ -27,6 +27,7 @@
 #include "yyjson.h"
 
 #include <atomic>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <condition_variable>
@@ -128,6 +129,17 @@ static void tts_append_s16le(std::string & out, const float * samples, int n_sam
     }
 }
 
+// Voice names are case insensitive: the registry, the synthesis lookup
+// and the delete route all see the lowercase form, matching the model
+// speaker lookup.
+static std::string tts_voice_name(const char * s) {
+    std::string out(s);
+    for (char & c : out) {
+        c = (char) std::tolower((unsigned char) c);
+    }
+    return out;
+}
+
 // Write a JSON error body in the OAI error envelope and set the status.
 static void tts_json_error(httplib::Response & res, int status, const char * type, const char * message) {
     yyjson_mut_doc * doc  = yyjson_mut_doc_new(NULL);
@@ -169,7 +181,7 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
     req.input = yyjson_get_str(input);
 
     yyjson_val * voice = yyjson_obj_get(root, "voice");
-    req.voice          = yyjson_is_str(voice) ? yyjson_get_str(voice) : "";
+    req.voice          = yyjson_is_str(voice) ? tts_voice_name(yyjson_get_str(voice)) : "";
 
     yyjson_val * instructions = yyjson_obj_get(root, "instructions");
     req.instructions          = yyjson_is_str(instructions) ? yyjson_get_str(instructions) : "";
@@ -405,7 +417,7 @@ static bool tts_parse_voice_upload(const std::string & body, tts_voice_upload & 
         yyjson_doc_free(doc);
         return false;
     }
-    up.name = yyjson_get_str(name);
+    up.name = tts_voice_name(yyjson_get_str(name));
 
     yyjson_val * ref_text = yyjson_obj_get(root, "ref_text");
     up.ref_text           = yyjson_is_str(ref_text) ? yyjson_get_str(ref_text) : "";
@@ -463,7 +475,7 @@ static void tts_handle_voice_delete(const tts_backend &      be,
         tts_json_error(res, 501, "not_implemented", "this backend has no voice registry");
         return;
     }
-    const std::string name = http_req.matches[1];
+    const std::string name = tts_voice_name(http_req.matches[1].str().c_str());
     if (!be.remove_voice(name)) {
         tts_json_error(res, 404, "not_found_error", "no registered voice with this name");
         return;

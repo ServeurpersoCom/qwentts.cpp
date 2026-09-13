@@ -384,6 +384,11 @@ QT_API int qt_n_speakers(const struct qt_context * q);
 // i is out of range. The pointer stays valid until qt_free. UTF-8.
 QT_API const char * qt_speaker_name(const struct qt_context * q, int i);
 
+// Model type of the loaded talker: "base", "custom_voice" or
+// "voice_design". Voice references are only valid on "base". The pointer
+// stays valid until qt_free.
+QT_API const char * qt_model_type(const struct qt_context * q);
+
 #ifdef __cplusplus
 }
 #endif

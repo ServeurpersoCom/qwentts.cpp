@@ -744,4 +744,12 @@ const char * qt_speaker_name(const struct qt_context * q, int i) {
     return q->pt.speakers[(size_t) i].name.c_str();
 }
 
+const char * qt_model_type(const struct qt_context * q) {
+    if (!q) {
+        qt_set_error("qt_model_type: q is NULL");
+        return NULL;
+    }
+    return q->pt.model_type.c_str();
+}
+
 }  // extern "C"
