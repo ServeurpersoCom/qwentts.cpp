@@ -59,13 +59,13 @@ extern "C" {
 // git short hash + commit date string returned by qt_version(); for
 // binding compat checks, QT_ABI_VERSION is the only number that
 // matters.
-#define QT_ABI_VERSION 4
+#define QT_ABI_VERSION 5
 
-// Oldest struct layout this build addresses. A v3 or older
+// Oldest struct layout this build addresses. A v4 or older
 // qt_tts_params places its trailing fields at offsets this build does
 // not map, so such a struct is unreadable here and its caller rebuilds
 // against this header.
-#define QT_ABI_MIN_VERSION 4
+#define QT_ABI_MIN_VERSION 5
 
 // Returns a static string of the form "<git-hash> (<date>)" identifying
 // the exact commit this binary was built from. Safe to call from any
@@ -295,20 +295,21 @@ struct qt_tts_params {
     int           ref_n_samples;
     const char *  ref_text;
 
-    // Sampling configuration. seed == -1 is resolved by qt_synthesize
-    // to a hardware random seed via std::random_device, anything else
-    // is forwarded verbatim for deterministic replay across runs.
-    // Defaults match the upstream Python reference: do_sample true,
-    // temperature 0.9, top_k 50, top_p 1.0, repetition_penalty 1.05,
-    // subtalker mirrors talker, max_new_tokens 2048.
+    // Sampling configuration, one independent sampler per stack as in
+    // the upstream reference: the talker draws c0 with temperature,
+    // top_k, top_p and repetition_penalty, the sub-talker draws the
+    // acoustic codes with its own temperature, top_k and top_p. A
+    // temperature of 0 selects argmax on that stack; top_k <= 0 and
+    // top_p >= 1 disable the respective cutoff. seed == -1 is resolved
+    // by qt_synthesize to a hardware random seed via std::random_device,
+    // anything else is forwarded verbatim for deterministic replay.
+    // Defaults come from sampling-defaults.h.
     int64_t seed;
     int     max_new_tokens;
-    bool    do_sample;
     float   temperature;
     int     top_k;
     float   top_p;
     float   repetition_penalty;
-    bool    subtalker_do_sample;
     float   subtalker_temperature;
     int     subtalker_top_k;
     float   subtalker_top_p;
@@ -349,10 +350,9 @@ struct qt_tts_params {
     int             ref_T;
 };
 
-// Initialise to the standard defaults. Strings NULL, seed -1,
-// max_new_tokens 2048, do_sample true, temperature 0.9, top_k 50,
-// top_p 1.0, repetition_penalty 1.05, subtalker mirrors talker,
-// dump_dir NULL, cancel NULL, on_chunk NULL.
+// Initialise to the standard defaults. Strings NULL, seed -1, sampling
+// fields from sampling-defaults.h, dump_dir NULL, cancel NULL, on_chunk
+// NULL.
 QT_API void qt_tts_default_params(struct qt_tts_params * p);
 
 // Number of RVQ codebooks (K) of the loaded codec. Pre-encoded ICL

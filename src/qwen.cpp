@@ -20,6 +20,7 @@
 #include "bpe.h"
 #include "pipeline-tts.h"
 #include "qt-error.h"
+#include "sampling-defaults.h"
 #include "speaker-encoder-extract.h"
 #include "timer.h"
 #include "version.h"
@@ -247,16 +248,14 @@ void qt_tts_default_params(struct qt_tts_params * p) {
     p->ref_n_samples         = 0;
     p->ref_text              = nullptr;
     p->seed                  = -1;
-    p->max_new_tokens        = 2048;
-    p->do_sample             = true;
-    p->temperature           = 0.9f;
-    p->top_k                 = 50;
-    p->top_p                 = 1.0f;
-    p->repetition_penalty    = 1.05f;
-    p->subtalker_do_sample   = true;
-    p->subtalker_temperature = 0.9f;
-    p->subtalker_top_k       = 50;
-    p->subtalker_top_p       = 1.0f;
+    p->max_new_tokens        = QT_DEFAULT_MAX_NEW_TOKENS;
+    p->temperature           = QT_DEFAULT_TEMPERATURE;
+    p->top_k                 = QT_DEFAULT_TOP_K;
+    p->top_p                 = QT_DEFAULT_TOP_P;
+    p->repetition_penalty    = QT_DEFAULT_REPETITION_PENALTY;
+    p->subtalker_temperature = QT_DEFAULT_SUBTALKER_TEMPERATURE;
+    p->subtalker_top_k       = QT_DEFAULT_SUBTALKER_TOP_K;
+    p->subtalker_top_p       = QT_DEFAULT_SUBTALKER_TOP_P;
     p->dump_dir              = nullptr;
     p->cancel                = nullptr;
     p->cancel_user_data      = nullptr;

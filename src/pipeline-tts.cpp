@@ -13,6 +13,7 @@
 #include "pipeline-codec.h"
 #include "prompt-builder.h"
 #include "qt-error.h"
+#include "sampling-defaults.h"
 #include "sampling.h"
 #include "speaker-encoder-extract.h"
 #include "talker-forward.h"
@@ -92,29 +93,18 @@ static void parse_speakers(const GGUFModel & gf, std::vector<SpeakerEntry> & out
     }
 }
 
-static void parse_generation_defaults(const GGUFModel & gf, GenerationDefaults & g) {
-    g.do_sample             = gf_get_bool(gf, "generation.do_sample");
-    g.top_k                 = (int) gf_get_u32(gf, "generation.top_k");
-    g.top_p                 = gf_get_f32(gf, "generation.top_p");
-    g.temperature           = gf_get_f32(gf, "generation.temperature");
-    g.repetition_penalty    = gf_get_f32(gf, "generation.repetition_penalty");
-    g.subtalker_do_sample   = gf_get_bool(gf, "generation.subtalker_do_sample");
-    g.subtalker_top_k       = (int) gf_get_u32(gf, "generation.subtalker_top_k");
-    g.subtalker_top_p       = gf_get_f32(gf, "generation.subtalker_top_p");
-    g.subtalker_temperature = gf_get_f32(gf, "generation.subtalker_temperature");
-    g.max_new_tokens        = (int) gf_get_u32(gf, "generation.max_new_tokens");
-}
-
-// Ensure the static predictor graph set for batch width N exists: the
-// frame graph over one persistent sampler state. Built lazily on the
-// first frame at a given width, then replayed for the process
-// lifetime.
-static bool pipeline_tts_cp_graphs_ensure(PipelineTTS * pt, int N) {
+// Ensure the static predictor frame graph of flavor tail exists for
+// batch width N, over the set's persistent sampler state. Built lazily
+// on the first frame that needs it, then replayed for the process
+// lifetime. The fixed tail serves every slot at the default top_k with
+// the nucleus off; the full tail serves any other sampling request.
+static bool pipeline_tts_cp_graphs_ensure(PipelineTTS * pt, int N, enum SamplerTail tail) {
     if ((int) pt->cp_graphs.size() < N) {
         pt->cp_graphs.resize((size_t) N);
     }
-    CodePredGraphSet & s = pt->cp_graphs[(size_t) (N - 1)];
-    if (s.frame.ctx != NULL) {
+    CodePredGraphSet & s     = pt->cp_graphs[(size_t) (N - 1)];
+    CodePredGraph &    frame = tail == SAMPLER_TAIL_FIXED ? s.frame : s.frame_full;
+    if (frame.ctx != NULL) {
         return true;
     }
 
@@ -126,7 +116,8 @@ static bool pipeline_tts_cp_graphs_ensure(PipelineTTS * pt, int N) {
         struct ggml_init_params gp = { ggml_tensor_overhead() * 8, NULL, true };
         s.sampler_ctx              = ggml_init(gp);
         if (s.sampler_ctx) {
-            sampler_inputs_build(s.sampler_ctx, &s.sampler, N, n_steps, pt->gen_defaults.subtalker_top_k);
+            sampler_inputs_build(s.sampler_ctx, &s.sampler, N, n_steps, pt->code_predictor.vocab_size,
+                                 QT_DEFAULT_SUBTALKER_TOP_K);
             s.sampler_buf = ggml_backend_alloc_ctx_tensors(s.sampler_ctx, pt->backend);
         }
         if (!s.sampler_ctx || !s.sampler_buf) {
@@ -141,8 +132,8 @@ static bool pipeline_tts_cp_graphs_ensure(PipelineTTS * pt, int N) {
     }
 
     return code_predictor_frame_graph_build(&pt->code_predictor, &pt->code_predictor_kv, pt->backend,
-                                            pt->talker.codec_embedding, pt->hidden_bridge, &s.sampler, N,
-                                            pt->use_flash_attn, pt->clamp_fp16, &s.frame);
+                                            pt->talker.codec_embedding, pt->hidden_bridge, &s.sampler, tail, N,
+                                            pt->use_flash_attn, pt->clamp_fp16, &frame);
 }
 
 bool pipeline_tts_load(PipelineTTS * pt,
@@ -195,7 +186,6 @@ bool pipeline_tts_load(PipelineTTS * pt,
     parse_text_specials(pt->gguf_talker, pt->text_specials);
     parse_languages(pt->gguf_talker, pt->languages);
     parse_speakers(pt->gguf_talker, pt->speakers);
-    parse_generation_defaults(pt->gguf_talker, pt->gen_defaults);
 
     if (!talker_weights_load(&pt->talker, pt->gguf_talker, pt->backend)) {
         gf_close(&pt->gguf_talker);
@@ -329,7 +319,7 @@ bool pipeline_tts_load(PipelineTTS * pt,
     // on first use.
     pt->talker_decode_graphs.resize(((size_t) pt->talker_kv.max_seq_len + 255) / 256);
     bool graphs_ok = graph_arena_init(&pt->talker_arena, talker_graph_max_nodes(pt->talker.num_hidden_layers)) &&
-                     pipeline_tts_cp_graphs_ensure(pt, 1);
+                     pipeline_tts_cp_graphs_ensure(pt, 1, SAMPLER_TAIL_FIXED);
     if (!graphs_ok) {
         for (size_t n = 0; n < pt->cp_graphs.size(); n++) {
             code_predictor_graph_set_free(&pt->cp_graphs[n]);
@@ -516,10 +506,6 @@ struct TtsSlot {
     std::vector<int32_t> ref_codes_store;
     const int32_t *      ref_codes_ptr;
     int                  ref_codes_T;
-
-    // Resolved sampling temperatures (0 selects greedy).
-    float talker_T;
-    float subtk_T;
 
     // AR state, one to one with the single sequence loop.
     int                  step;            // frames emitted so far
@@ -916,8 +902,6 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
         }
     }
 
-    s.talker_T = params->do_sample ? params->temperature : 0.0f;
-    s.subtk_T  = params->subtalker_do_sample ? params->subtalker_temperature : 0.0f;
     s.prev_ids.assign((size_t) pt->num_code_groups, 0);
     s.all_codes.reserve((size_t) params->max_new_tokens);
     s.talker_history.reserve((size_t) params->max_new_tokens);
@@ -1172,7 +1156,7 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
         Timer t_host;
         apply_suppress(s.logits.data(), vocab, vocab - 1024, vocab, codec_eos_id);
         float u_c0 = 0.0f;
-        int   c0   = sample_top_k_p(s.logits.data(), vocab, s.talker_T, p->top_k, p->top_p, p->repetition_penalty,
+        int   c0   = sample_top_k_p(s.logits.data(), vocab, p->temperature, p->top_k, p->top_p, p->repetition_penalty,
                                     s.talker_history.data(), (int) s.talker_history.size(), s.job->resolved_seed,
                                     s.subseq_counter, &u_c0);
         s.perf.host_ms += t_host.ms();
@@ -1213,7 +1197,32 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
     if (any_live) {
         CodePredictorOutput cp;
 
-        if (!pipeline_tts_cp_graphs_ensure(pt, N)) {
+        // Per lane sampling controls, idle lanes ride along at the
+        // fixed tail defaults. The frame runs the fixed tail when every
+        // live lane matches it, the full tail otherwise.
+        std::vector<int32_t>     c0s((size_t) N, 0);
+        std::vector<SamplerSlot> slots((size_t) N, { 0.0f, QT_DEFAULT_SUBTALKER_TOP_K, 1.0f, 0, 0 });
+        const char *             cp_dump = NULL;
+        enum SamplerTail         tail    = SAMPLER_TAIL_FIXED;
+        for (int i = 0; i < N; i++) {
+            TtsSlot & s = e->slots[(size_t) i];
+            if (!s.has_frame) {
+                continue;
+            }
+            const struct qt_tts_params * p = s.job->params;
+            c0s[(size_t) i]                = s.pending_c0;
+            slots[(size_t) i]              = { p->subtalker_temperature, p->subtalker_top_k, p->subtalker_top_p,
+                                               s.job->resolved_seed, s.subseq_counter - 1 };
+            if (p->subtalker_top_k != QT_DEFAULT_SUBTALKER_TOP_K ||
+                (p->subtalker_top_p > 0.0f && p->subtalker_top_p < 1.0f)) {
+                tail = SAMPLER_TAIL_FULL;
+            }
+            if (N == 1 && s.step == 0 && p->dump_dir) {
+                cp_dump = p->dump_dir;
+            }
+        }
+
+        if (!pipeline_tts_cp_graphs_ensure(pt, N, tail)) {
             qt_set_error("tts_engine_step: code predictor graph build failed (N=%d)", N);
             for (TtsSlot & s : e->slots) {
                 s.finished   = true;
@@ -1221,30 +1230,11 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
                 s.has_frame  = false;
             }
         } else {
-            CodePredGraphSet &   gs = pt->cp_graphs[(size_t) (N - 1)];
-            std::vector<int32_t> c0s((size_t) N, 0);
-            std::vector<float>   temps((size_t) N, 0.0f);
-            std::vector<int64_t> seeds((size_t) N, 0);
-            std::vector<int64_t> subseqs((size_t) N, 0);
-            const char *         cp_dump = NULL;
-            for (int i = 0; i < N; i++) {
-                TtsSlot & s = e->slots[(size_t) i];
-                if (!s.has_frame) {
-                    continue;
-                }
-                const struct qt_tts_params * p = s.job->params;
-                c0s[(size_t) i]                = s.pending_c0;
-                temps[(size_t) i]              = s.subtk_T;
-                seeds[(size_t) i]              = s.job->resolved_seed;
-                subseqs[(size_t) i]            = s.subseq_counter - 1;
-                if (N == 1 && s.step == 0 && p->dump_dir) {
-                    cp_dump = p->dump_dir;
-                }
-            }
-            Timer t_pred;
-            bool  pred_ok =
-                code_predictor_frame_step(&pt->code_predictor, pt->backend, &gs.frame, &gs.sampler, c0s.data(), N,
-                                          temps.data(), seeds.data(), subseqs.data(), cp_dump, &cp);
+            CodePredGraphSet & gs    = pt->cp_graphs[(size_t) (N - 1)];
+            CodePredGraph &    frame = tail == SAMPLER_TAIL_FIXED ? gs.frame : gs.frame_full;
+            Timer              t_pred;
+            bool pred_ok = code_predictor_frame_step(&pt->code_predictor, pt->backend, &frame, &gs.sampler, c0s.data(),
+                                                     slots.data(), N, cp_dump, &cp);
             if (!pred_ok) {
                 for (TtsSlot & s : e->slots) {
                     s.finished   = true;

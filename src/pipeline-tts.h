@@ -61,19 +61,6 @@ struct SpeakerEntry {
     std::string dialect;
 };
 
-struct GenerationDefaults {
-    bool  do_sample;
-    int   top_k;
-    float top_p;
-    float temperature;
-    float repetition_penalty;
-    bool  subtalker_do_sample;
-    int   subtalker_top_k;
-    float subtalker_top_p;
-    float subtalker_temperature;
-    int   max_new_tokens;
-};
-
 struct PromptPrefixCacheEntry {
     std::string        key;
     int                rows;
@@ -98,7 +85,8 @@ struct PromptCache {
 // the set reads and writes them across replays, so they never enter
 // gallocr pools.
 struct CodePredGraphSet {
-    CodePredGraph         frame;  // prefill and every acoustic step in one cgraph
+    CodePredGraph         frame;       // prefill and every acoustic step in one cgraph, fixed tail
+    CodePredGraph         frame_full;  // same frame with the per slot top_k / top_p tail, built on demand
     SamplerInputs         sampler;
     struct ggml_context * sampler_ctx = nullptr;
     ggml_backend_buffer_t sampler_buf = nullptr;
@@ -106,6 +94,7 @@ struct CodePredGraphSet {
 
 static inline void code_predictor_graph_set_free(CodePredGraphSet * s) {
     code_predictor_graph_free(&s->frame);
+    code_predictor_graph_free(&s->frame_full);
     if (s->sampler_buf) {
         ggml_backend_buffer_free(s->sampler_buf);
         s->sampler_buf = nullptr;
@@ -151,7 +140,6 @@ struct PipelineTTS {
     TextSpecials               text_specials;
     std::vector<LanguageEntry> languages;
     std::vector<SpeakerEntry>  speakers;
-    GenerationDefaults         gen_defaults;
     PromptCache                prompt_cache;
 
     BackendPair          bp;

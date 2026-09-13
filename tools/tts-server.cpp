@@ -274,30 +274,30 @@ int main(int argc, char ** argv) {
             p.instruct = req.instructions.c_str();
         }
 
-        // Sampling overrides ride straight into the ABI; the subtalker
-        // mirrors the talker knobs so the HTTP surface stays a single
-        // coherent set. A temperature of zero selects greedy decoding
-        // on both.
+        // Sampling overrides ride straight into the ABI, each field
+        // driving its own stack. A temperature of zero selects greedy
+        // decoding on that stack.
         p.seed = req.seed;
         if (req.max_new_tokens != -1) {
             p.max_new_tokens = req.max_new_tokens;
         }
         if (req.top_k != -1) {
-            p.top_k           = req.top_k;
-            p.subtalker_top_k = req.top_k;
+            p.top_k = req.top_k;
         }
         if (!std::isnan(req.temperature)) {
-            if (req.temperature == 0.0f) {
-                p.do_sample           = false;
-                p.subtalker_do_sample = false;
-            } else {
-                p.temperature           = req.temperature;
-                p.subtalker_temperature = req.temperature;
-            }
+            p.temperature = req.temperature;
         }
         if (!std::isnan(req.top_p)) {
-            p.top_p           = req.top_p;
-            p.subtalker_top_p = req.top_p;
+            p.top_p = req.top_p;
+        }
+        if (req.subtalker_top_k != -1) {
+            p.subtalker_top_k = req.subtalker_top_k;
+        }
+        if (!std::isnan(req.subtalker_temperature)) {
+            p.subtalker_temperature = req.subtalker_temperature;
+        }
+        if (!std::isnan(req.subtalker_top_p)) {
+            p.subtalker_top_p = req.subtalker_top_p;
         }
         if (!std::isnan(req.repetition_penalty)) {
             p.repetition_penalty = req.repetition_penalty;

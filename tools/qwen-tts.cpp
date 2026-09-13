@@ -14,6 +14,7 @@
 #include "audio-io.h"
 #include "qwen.h"
 #include "rvq-file.h"
+#include "sampling-defaults.h"
 #include "utf8.h"
 
 #include <cstdio>
@@ -52,24 +53,26 @@ static void print_usage(const char * prog) {
             "  --ref-rvq <path>        Pre-encoded reference codes from qwen-codec (requires\n"
             "                          --ref-spk and --ref-text, enables ICL clone mode)\n"
             "  --ref-text <path>       Transcript file for the reference (enables ICL clone mode)\n"
-            "  --max-new <n>           Max new audio frames (default: 2048)\n"
+            "  --max-new <n>           Max new audio frames (default: %d)\n"
             "  --codec-chunk-dur <f>   Codec decode chunk duration in seconds (default: 24.0)\n"
             "  --stream-by-line        Flush synthesis at each newline, one WAV header per line (-o '-')\n\n"
             "Sampling:\n"
             "  --seed <int>            Sampling seed (default: -1 for random)\n"
-            "  --greedy                Disable stochastic sampling on both stacks\n"
-            "  --temp <f>              Talker temperature (default: 0.9)\n"
-            "  --top-k <n>             Talker top-k (default: 50, 0 disables)\n"
-            "  --top-p <f>             Talker top-p (default: 1.0)\n"
-            "  --rep-pen <f>           Talker repetition penalty (default: 1.05)\n"
-            "  --sub-temp <f>          Sub-talker temperature (default: 0.9)\n"
-            "  --sub-top-k <n>         Sub-talker top-k (default: 50)\n"
-            "  --sub-top-p <f>         Sub-talker top-p (default: 1.0)\n\n"
+            "  --greedy                Argmax on both stacks (temperature 0)\n"
+            "  --temp <f>              Talker temperature (default: %g, 0 selects argmax)\n"
+            "  --top-k <n>             Talker top-k (default: %d, 0 disables)\n"
+            "  --top-p <f>             Talker top-p (default: %g, 1 disables)\n"
+            "  --rep-pen <f>           Talker repetition penalty (default: %g)\n"
+            "  --sub-temp <f>          Sub-talker temperature (default: %g, 0 selects argmax)\n"
+            "  --sub-top-k <n>         Sub-talker top-k (default: %d, 0 disables)\n"
+            "  --sub-top-p <f>         Sub-talker top-p (default: %g, 1 disables)\n\n"
             "Debug:\n"
             "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
             "  --dump <dir>            Dump intermediate tensors (f32) to <dir>\n",
-            prog);
+            prog, QT_DEFAULT_MAX_NEW_TOKENS, (double) QT_DEFAULT_TEMPERATURE, QT_DEFAULT_TOP_K,
+            (double) QT_DEFAULT_TOP_P, (double) QT_DEFAULT_REPETITION_PENALTY,
+            (double) QT_DEFAULT_SUBTALKER_TEMPERATURE, QT_DEFAULT_SUBTALKER_TOP_K, (double) QT_DEFAULT_SUBTALKER_TOP_P);
 }
 
 struct Args {
@@ -82,24 +85,16 @@ struct Args {
     const char * ref_spk;
     const char * ref_rvq;
     const char * ref_text_path;
-    const char * dump_dir;
     const char * out_wav;
     const char * format;
-    int          max_new_tokens;
-    int64_t      seed;
-    bool         do_sample;
-    float        temperature;
-    int          top_k;
-    float        top_p;
-    float        repetition_penalty;
-    int          subtalker_top_k;
-    float        subtalker_top_p;
-    float        subtalker_temperature;
-    bool         subtalker_do_sample;
     bool         use_fa;
     bool         clamp_fp16;
     bool         stream_by_line;
     float        codec_chunk_sec;
+
+    // Synthesis params seeded by qt_tts_default_params; sampling flags
+    // write straight into it, so only what the user sets deviates.
+    qt_tts_params tts;
 };
 
 // Read all of stdin into a string. Binary mode on Windows so UTF-16 input
@@ -178,26 +173,16 @@ static bool read_text_file(const char * path, std::string & out) {
 }
 
 static bool parse_args(int argc, char ** argv, Args & a) {
-    a                       = {};
-    a.lang                  = "auto";
-    a.format                = "wav16";
-    a.max_new_tokens        = 2048;
-    a.seed                  = -1;
-    a.do_sample             = true;
-    a.temperature           = 0.9f;
-    a.top_k                 = 50;
-    a.top_p                 = 1.0f;
-    a.repetition_penalty    = 1.05f;
-    a.subtalker_do_sample   = true;
-    a.subtalker_top_k       = 50;
-    a.subtalker_top_p       = 1.0f;
-    a.subtalker_temperature = 0.9f;
-    a.use_fa                = true;
-    a.clamp_fp16            = false;
-    a.stream_by_line        = false;
+    a                 = {};
+    a.lang            = "auto";
+    a.format          = "wav16";
+    a.use_fa          = true;
+    a.clamp_fp16      = false;
+    a.stream_by_line  = false;
     // Chunk sentinel : qt_init resolves a non positive value to the
     // library default.
-    a.codec_chunk_sec       = 0.0f;
+    a.codec_chunk_sec = 0.0f;
+    qt_tts_default_params(&a.tts);
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
         if (std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--help") == 0) {
@@ -224,33 +209,32 @@ static bool parse_args(int argc, char ** argv, Args & a) {
         } else if (std::strcmp(arg, "--format") == 0 && i + 1 < argc) {
             a.format = argv[++i];
         } else if (std::strcmp(arg, "--dump") == 0 && i + 1 < argc) {
-            a.dump_dir = argv[++i];
+            a.tts.dump_dir = argv[++i];
         } else if (std::strcmp(arg, "--max-new") == 0 && i + 1 < argc) {
-            a.max_new_tokens = std::atoi(argv[++i]);
+            a.tts.max_new_tokens = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--seed") == 0 && i + 1 < argc) {
-            a.seed = (int64_t) std::atoll(argv[++i]);
+            a.tts.seed = (int64_t) std::atoll(argv[++i]);
         } else if (std::strcmp(arg, "--greedy") == 0) {
-            // Greedy mode: argmax sampling on both stacks. The sampling
-            // fast path in sampling.h uses temperature <= 0 to short
-            // circuit to argmax, bypassing rep penalty and top-k/p
-            // truncation, which exactly mirrors the Python reference
-            // greedy behaviour used by tests/debug-tts-cossim.py.
-            a.do_sample           = false;
-            a.subtalker_do_sample = false;
+            // Argmax on both stacks: temperature 0 short circuits the
+            // host sampler and the predictor tail alike, bypassing rep
+            // penalty and top-k/p truncation, which mirrors the Python
+            // reference greedy behaviour used by tests/debug-tts-cossim.py.
+            a.tts.temperature           = 0.0f;
+            a.tts.subtalker_temperature = 0.0f;
         } else if (std::strcmp(arg, "--temp") == 0 && i + 1 < argc) {
-            a.temperature = (float) std::atof(argv[++i]);
+            a.tts.temperature = (float) std::atof(argv[++i]);
         } else if (std::strcmp(arg, "--top-k") == 0 && i + 1 < argc) {
-            a.top_k = std::atoi(argv[++i]);
+            a.tts.top_k = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--top-p") == 0 && i + 1 < argc) {
-            a.top_p = (float) std::atof(argv[++i]);
+            a.tts.top_p = (float) std::atof(argv[++i]);
         } else if (std::strcmp(arg, "--rep-pen") == 0 && i + 1 < argc) {
-            a.repetition_penalty = (float) std::atof(argv[++i]);
+            a.tts.repetition_penalty = (float) std::atof(argv[++i]);
         } else if (std::strcmp(arg, "--sub-temp") == 0 && i + 1 < argc) {
-            a.subtalker_temperature = (float) std::atof(argv[++i]);
+            a.tts.subtalker_temperature = (float) std::atof(argv[++i]);
         } else if (std::strcmp(arg, "--sub-top-k") == 0 && i + 1 < argc) {
-            a.subtalker_top_k = std::atoi(argv[++i]);
+            a.tts.subtalker_top_k = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--sub-top-p") == 0 && i + 1 < argc) {
-            a.subtalker_top_p = (float) std::atof(argv[++i]);
+            a.tts.subtalker_top_p = (float) std::atof(argv[++i]);
         } else if (std::strcmp(arg, "--no-fa") == 0) {
             a.use_fa = false;
         } else if (std::strcmp(arg, "--clamp-fp16") == 0) {
@@ -385,33 +369,20 @@ static int run(const Args & a) {
     }
     const char * text = text_buf.c_str();
 
-    // Translate CLI args into the facade params. Seed -1 is forwarded
-    // verbatim and resolved by qt_synthesize via std::random_device.
-    qt_tts_params params;
-    qt_tts_default_params(&params);
-    params.text                  = text;
-    params.lang                  = a.lang;
-    params.instruct              = a.instruct;
-    params.speaker               = a.speaker;
-    params.ref_audio_24k         = ref_audio_24k;
-    params.ref_n_samples         = ref_n_samples;
-    params.ref_text              = ref_text;
-    params.ref_spk_emb           = ref_spk_emb.empty() ? NULL : ref_spk_emb.data();
-    params.ref_spk_dim           = (int) ref_spk_emb.size();
-    params.ref_codes             = ref_codes.empty() ? NULL : ref_codes.data();
-    params.ref_T                 = ref_T;
-    params.seed                  = a.seed;
-    params.max_new_tokens        = a.max_new_tokens;
-    params.do_sample             = a.do_sample;
-    params.temperature           = a.temperature;
-    params.top_k                 = a.top_k;
-    params.top_p                 = a.top_p;
-    params.repetition_penalty    = a.repetition_penalty;
-    params.subtalker_do_sample   = a.subtalker_do_sample;
-    params.subtalker_temperature = a.subtalker_temperature;
-    params.subtalker_top_k       = a.subtalker_top_k;
-    params.subtalker_top_p       = a.subtalker_top_p;
-    params.dump_dir              = a.dump_dir;
+    // Sampling and seed already sit in a.tts; the rest of the facade
+    // params comes from the resolved inputs.
+    qt_tts_params params = a.tts;
+    params.text          = text;
+    params.lang          = a.lang;
+    params.instruct      = a.instruct;
+    params.speaker       = a.speaker;
+    params.ref_audio_24k = ref_audio_24k;
+    params.ref_n_samples = ref_n_samples;
+    params.ref_text      = ref_text;
+    params.ref_spk_emb   = ref_spk_emb.empty() ? NULL : ref_spk_emb.data();
+    params.ref_spk_dim   = (int) ref_spk_emb.size();
+    params.ref_codes     = ref_codes.empty() ? NULL : ref_codes.data();
+    params.ref_T         = ref_T;
 
     if (stream_to_stdout) {
         wav_stream ws = {};

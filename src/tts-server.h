@@ -49,14 +49,18 @@ struct tts_request {
     std::string format;        // "pcm" (stream) or "wav" (one-shot)
     float       speed;         // OAI speed, parsed then ignored (no time stretch in the ABI)
 
-    // Optional sampling overrides. -1 (ints) and NaN (floats) mark a
-    // field the client left unset, keeping the engine defaults.
-    int64_t seed;                // forwarded verbatim, -1 draws a random seed
-    int     max_new_tokens;      // strictly positive
-    int     top_k;               // 0 disables the top-k filter
-    float   temperature;         // 0 selects greedy decoding
-    float   top_p;               // in (0, 1]
-    float   repetition_penalty;  // strictly positive
+    // Optional sampling overrides, one set per stack. -1 (ints) and NaN
+    // (floats) mark a field the client left unset, keeping the engine
+    // defaults.
+    int64_t seed;                   // forwarded verbatim, -1 draws a random seed
+    int     max_new_tokens;         // strictly positive
+    int     top_k;                  // 0 disables the top-k filter
+    float   temperature;            // 0 selects greedy decoding
+    float   top_p;                  // in (0, 1]
+    float   repetition_penalty;     // strictly positive
+    int     subtalker_top_k;        // 0 disables the top-k filter
+    float   subtalker_temperature;  // 0 selects greedy decoding
+    float   subtalker_top_p;        // in (0, 1]
 };
 
 // One voice registration parsed from the POST /v1/audio/voices JSON body.
@@ -194,12 +198,15 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
 
     // Optional sampling overrides. A missing field keeps its unset
     // marker; a present field must be well typed and in domain.
-    req.seed               = -1;
-    req.max_new_tokens     = -1;
-    req.top_k              = -1;
-    req.temperature        = NAN;
-    req.top_p              = NAN;
-    req.repetition_penalty = NAN;
+    req.seed                  = -1;
+    req.max_new_tokens        = -1;
+    req.top_k                 = -1;
+    req.temperature           = NAN;
+    req.top_p                 = NAN;
+    req.repetition_penalty    = NAN;
+    req.subtalker_top_k       = -1;
+    req.subtalker_temperature = NAN;
+    req.subtalker_top_p       = NAN;
 
     auto opt_int = [&](const char * key, int64_t lo, int64_t hi, int64_t & out) -> bool {
         yyjson_val * v = yyjson_obj_get(root, key);
@@ -226,14 +233,19 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
         return true;
     };
 
-    int64_t max_new = -1;
-    int64_t top_k   = -1;
+    int64_t max_new   = -1;
+    int64_t top_k     = -1;
+    int64_t sub_top_k = -1;
     bool    ok = opt_int("seed", INT64_MIN, INT64_MAX, req.seed) && opt_int("max_new_tokens", 1, INT32_MAX, max_new) &&
               opt_int("top_k", 0, INT32_MAX, top_k) && opt_num("temperature", 0.0, FLT_MAX, req.temperature) &&
               opt_num("top_p", DBL_MIN, 1.0, req.top_p) &&
-              opt_num("repetition_penalty", DBL_MIN, FLT_MAX, req.repetition_penalty);
-    req.max_new_tokens = (int) max_new;
-    req.top_k          = (int) top_k;
+              opt_num("repetition_penalty", DBL_MIN, FLT_MAX, req.repetition_penalty) &&
+              opt_int("subtalker_top_k", 0, INT32_MAX, sub_top_k) &&
+              opt_num("subtalker_temperature", 0.0, FLT_MAX, req.subtalker_temperature) &&
+              opt_num("subtalker_top_p", DBL_MIN, 1.0, req.subtalker_top_p);
+    req.max_new_tokens  = (int) max_new;
+    req.top_k           = (int) top_k;
+    req.subtalker_top_k = (int) sub_top_k;
 
     yyjson_doc_free(doc);
 
