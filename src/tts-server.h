@@ -299,11 +299,19 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
     // chunk callback aborts generation and frees the GPU instead of
     // finishing a stream nobody reads. Backpressure is the utterance
     // itself: pending grows at most to the full PCM of one synthesis.
+    //
+    // The stream opens on the first chunk: a synthesis that fails
+    // before producing audio gets the JSON error envelope with the
+    // mapped status, like the wav path. A failure after the stream
+    // started closes the connection without the terminating chunk, so
+    // the client sees a transport error instead of a clean EOF.
     struct stream_state {
         std::mutex              mu;
         std::condition_variable cv;
         std::string             pending;
         bool                    done = false;
+        int                     rc   = 0;
+        std::string             err;
         std::atomic<bool>       client_gone{ false };
         std::thread             th;
     };
@@ -322,12 +330,27 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
             st->cv.notify_all();
             return true;
         };
-        std::string synth_err;
-        be.synthesize(req, push, synth_err);
+        std::string                 synth_err;
+        int                         rc = be.synthesize(req, push, synth_err);
         std::lock_guard<std::mutex> lk(st->mu);
+        st->rc   = rc;
+        st->err  = synth_err;
         st->done = true;
         st->cv.notify_all();
     });
+
+    {
+        std::unique_lock<std::mutex> lk(st->mu);
+        st->cv.wait(lk, [&] { return st->done || !st->pending.empty(); });
+        if (st->pending.empty() && st->rc != 0) {
+            const int rc = st->rc;
+            err          = st->err;
+            lk.unlock();
+            st->th.join();
+            tts_json_error(res, tts_status_to_http(rc), "server_error", err.empty() ? "synthesis failed" : err.c_str());
+            return;
+        }
+    }
 
     res.set_header("Cache-Control", "no-cache");
     res.set_header("X-Accel-Buffering", "no");
@@ -335,10 +358,12 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
         "audio/pcm",
         [st](size_t, httplib::DataSink & sink) -> bool {
             std::string chunk;
+            int         rc = 0;
             {
                 std::unique_lock<std::mutex> lk(st->mu);
                 st->cv.wait(lk, [&] { return st->done || !st->pending.empty(); });
                 chunk.swap(st->pending);
+                rc = st->rc;
             }
             if (!chunk.empty()) {
                 if (!sink.write(chunk.data(), chunk.size())) {
@@ -346,6 +371,9 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
                     return false;
                 }
                 return true;
+            }
+            if (rc != 0) {
+                return false;
             }
             sink.done();
             return true;
