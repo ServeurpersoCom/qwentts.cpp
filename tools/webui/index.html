@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QwenTTS WebUI</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+    background: #f5f5f7;
+    color: #1d1d1f;
+    line-height: 1.6;
+}
+.container { max-width: 820px; margin: 0 auto; padding: 2.5rem 1.5rem; }
+header { margin-bottom: 2rem; }
+header h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; }
+header p { color: #86868b; font-size: 0.95rem; margin-top: 0.2rem; }
+.badge {
+    display: inline-block; font-size: 0.7rem; font-weight: 600; color: #fff;
+    background: #6b7280; padding: 0.15rem 0.55rem; border-radius: 99px;
+    vertical-align: middle; margin-left: 0.5rem;
+}
+.card {
+    background: #fff; border-radius: 14px; padding: 1.5rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin-bottom: 1.25rem;
+    border: 1px solid #e5e5e7;
+}
+textarea {
+    width: 100%; min-height: 170px; padding: 0.9rem 1rem;
+    border: 1.5px solid #d2d2d7; border-radius: 10px; font-size: 0.95rem;
+    font-family: inherit; resize: vertical; transition: border-color .2s;
+    line-height: 1.6; background: #fafafa;
+}
+textarea:focus { outline: none; border-color: #0071e3; background: #fff; }
+.controls {
+    display: flex; align-items: center; gap: 0.75rem;
+    margin-top: 1rem; flex-wrap: wrap;
+}
+select {
+    padding: 0.5rem 0.9rem; border: 1.5px solid #d2d2d7;
+    border-radius: 8px; font-size: 0.9rem; background: #fff;
+    cursor: pointer; color: #1d1d1f;
+}
+select:focus { outline: none; border-color: #0071e3; }
+.btn {
+    padding: 0.5rem 1.25rem; border: none; border-radius: 8px;
+    font-size: 0.9rem; font-weight: 600; cursor: pointer;
+    transition: all .2s; display: inline-flex; align-items: center; gap: 0.4rem;
+}
+.btn-speak { background: #0071e3; color: #fff; }
+.btn-speak:hover { background: #0062c4; }
+.btn-speak:disabled { background: #a1a1a6; cursor: not-allowed; }
+.btn-stop { background: #ff453a; color: #fff; }
+.btn-stop:hover { background: #d63a30; }
+.btn-download { background: #34c759; color: #fff; }
+.btn-download:hover { background: #2da94d; }
+.btn-download:disabled { background: #a1a1a6; cursor: not-allowed; }
+.status { margin-left: auto; color: #86868b; font-size: 0.85rem; white-space: nowrap; }
+.status .spinner { display: none; }
+.status.busy .spinner {
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid #d2d2d7; border-top-color: #0071e3;
+    border-radius: 50%; animation: spin .6s linear infinite;
+    vertical-align: middle; margin-right: 0.35rem;
+}
+.status.error .label { color: #ff453a; font-weight: 600; }
+.status.error .spinner { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.progress-track {
+    width: 100%; height: 4px; background: #e5e5e7;
+    border-radius: 2px; margin-top: 0.9rem; overflow: hidden;
+}
+.progress-fill {
+    height: 100%; background: linear-gradient(90deg, #0071e3, #34a853);
+    transition: width .35s ease; width: 0%; border-radius: 2px;
+}
+.sentences { margin-top: 0.5rem; min-height: 60px; }
+.sentence {
+    padding: 0.35rem 0.6rem; border-radius: 6px; margin-bottom: 0.15rem;
+    transition: all .25s; font-size: 0.95rem; border-left: 3px solid transparent;
+}
+.sentence.pending { color: #aeaeb2; }
+.sentence.active { background: #ebf5ff; color: #0071e3; font-weight: 600; border-left-color: #0071e3; }
+.sentence.done { color: #1d1d1f; border-left-color: #34a853; }
+.sentence.error { background: #fff2f0; color: #ff453a; border-left-color: #ff453a; }
+.error-banner {
+    display: none; background: #fff2f0; color: #ff453a; padding: 0.6rem 1rem;
+    border-radius: 8px; margin-top: 0.75rem; font-size: 0.85rem; border: 1px solid #ffd7d5;
+}
+.error-banner.visible { display: block; }
+.instruct-row { margin-top: 0.75rem; display: flex; align-items: center; gap: 0.5rem; }
+.instruct-row label { font-size: 0.8rem; color: #86868b; white-space: nowrap; font-weight: 500; }
+.instruct-input {
+    flex: 1; padding: 0.4rem 0.7rem; border: 1.5px solid #d2d2d7; border-radius: 8px;
+    font-size: 0.85rem; font-family: inherit; background: #fafafa; transition: border-color .2s;
+}
+.instruct-input:focus { outline: none; border-color: #0071e3; background: #fff; }
+.empty-state { color: #aeaeb2; text-align: center; padding: 2rem 0; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>QwenTTS WebUI <span class="badge">streaming</span></h1>
+        <p>Sentence-by-sentence streaming text-to-speech</p>
+    </header>
+
+    <div class="card">
+        <textarea id="text-input" placeholder="Paste or type text to speak…"></textarea>
+
+        <div class="controls">
+            <select id="voice-select"><option value="">Default voice</option></select>
+            <button class="btn btn-speak" id="speak-btn">&#9654; Speak</button>
+            <button class="btn btn-stop" id="stop-btn" style="display:none">&#9632; Stop</button>
+            <button class="btn btn-download" id="download-btn" style="display:none">&#8595; Download WAV</button>
+            <div class="status" id="status"><span class="label">Ready</span><span class="spinner"></span></div>
+        </div>
+        <div class="instruct-row">
+            <label for="instructions-input">Style:</label>
+            <input class="instruct-input" id="instructions-input" type="text" placeholder="e.g. speak cheerfully and with high energy" />
+        </div>
+
+        <div class="error-banner" id="error-banner"></div>
+
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+    </div>
+
+    <div class="card">
+        <div class="sentences" id="sentences"><div class="empty-state">Enter text and press Speak</div></div>
+    </div>
+</div>
+
+<script>
+(function () {
+    var textInput = document.getElementById('text-input');
+    var speakBtn = document.getElementById('speak-btn');
+    var stopBtn = document.getElementById('stop-btn');
+    var downloadBtn = document.getElementById('download-btn');
+    var voiceSelect = document.getElementById('voice-select');
+    var instructionsInput = document.getElementById('instructions-input');
+    var statusEl = document.getElementById('status');
+    var errorBanner = document.getElementById('error-banner');
+    var progressFill = document.getElementById('progress-fill');
+    var sentencesEl = document.getElementById('sentences');
+
+    var audioCtx = null;
+    var scheduledTime = 0;
+    var eventSource = null;
+    var totalSentences = 0;
+    var completedSentences = 0;
+    var audioChunks = [];
+
+    function getCtx() {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        return audioCtx;
+    }
+
+    function resetAudio() {
+        if (audioCtx) { audioCtx.close().catch(function(){}); audioCtx = null; }
+        scheduledTime = 0;
+    }
+
+    function setStatus(text, cls) {
+        var label = statusEl.querySelector('.label');
+        if (label) label.textContent = text;
+        statusEl.className = 'status' + (cls ? ' ' + cls : '');
+    }
+
+    function showError(msg) {
+        errorBanner.textContent = msg;
+        errorBanner.classList.add('visible');
+    }
+
+    function hideError() {
+        errorBanner.classList.remove('visible');
+    }
+
+    function updateProgress() {
+        var pct = totalSentences ? (completedSentences / totalSentences * 100) : 0;
+        progressFill.style.width = pct + '%';
+    }
+
+    function escapeHtml(s) {
+        var d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    function showSentences(text) {
+        if (!text.trim()) {
+            sentencesEl.innerHTML = '<div class="empty-state">Enter text and press Speak</div>';
+            return;
+        }
+        var parts = text.split('.');
+        var html = '';
+        var idx = 0;
+        for (var i = 0; i < parts.length; i++) {
+            var s = parts[i].trim();
+            if (!s) continue;
+            html += '<div class="sentence pending" data-idx="' + idx + '">' + escapeHtml(s) + (i < parts.length - 1 || text.endsWith('.') ? '.' : '') + '</div>';
+            idx++;
+        }
+        sentencesEl.innerHTML = html || '<div class="empty-state">Enter text and press Speak</div>';
+    }
+
+    function setSentenceState(idx, cls) {
+        var el = sentencesEl.querySelector('.sentence[data-idx="' + idx + '"]');
+        if (el) el.className = 'sentence ' + cls;
+    }
+
+    function playAudio(base64Data) {
+        var ctx = getCtx();
+        if (ctx.state === 'suspended') ctx.resume();
+        var binary = atob(base64Data);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        ctx.decodeAudioData(bytes.buffer,
+            function (buf) {
+                var src = ctx.createBufferSource();
+                src.buffer = buf;
+                src.connect(ctx.destination);
+                if (scheduledTime < ctx.currentTime) scheduledTime = ctx.currentTime;
+                src.start(scheduledTime);
+                scheduledTime += buf.duration;
+            },
+            function () { console.warn('audio decode failed for sentence chunk'); }
+        );
+    }
+
+    function base64ToBytes(b64) {
+        var binary = atob(b64);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+    }
+
+    // Offset of the PCM payload inside a WAV: walk the RIFF subchunks and
+    // stop at 'data'. Falls back to 44 for a standard header.
+    function wavDataOffset(buf) {
+        var off = 12;
+        while (off + 8 <= buf.length) {
+            var id = String.fromCharCode(buf[off], buf[off + 1], buf[off + 2], buf[off + 3]);
+            var size = buf[off + 4] | (buf[off + 5] << 8) | (buf[off + 6] << 16) | (buf[off + 7] << 24);
+            if (id === 'data') return off + 8;
+            off += 8 + size;
+        }
+        return 44;
+    }
+
+    // Stitch every collected WAV chunk (each a full RIFF file) into one
+    // valid WAV by keeping the first chunk's header and concatenating the
+    // raw PCM payloads, then fixing the RIFF/data size fields.
+    function assembleWav(chunks) {
+        if (!chunks.length) return null;
+        var first = base64ToBytes(chunks[0]);
+        var headerLen = wavDataOffset(first);
+        var total = first.length - headerLen;
+        var i, b;
+        for (i = 1; i < chunks.length; i++) {
+            b = base64ToBytes(chunks[i]);
+            total += b.length - wavDataOffset(b);
+        }
+        var out = new Uint8Array(headerLen + total);
+        out.set(first.subarray(0, headerLen), 0);
+        var w = 0;
+        for (i = 0; i < chunks.length; i++) {
+            b = base64ToBytes(chunks[i]);
+            var d = wavDataOffset(b);
+            out.set(b.subarray(d), headerLen + w);
+            w += b.length - d;
+        }
+        var dv = new DataView(out.buffer);
+        dv.setUint32(4, headerLen - 8 + total, true);
+        dv.setUint32(headerLen - 4, total, true);
+        return new Blob([out], { type: 'audio/wav' });
+    }
+
+    function downloadAudio() {
+        var blob = assembleWav(audioChunks);
+        if (!blob) return;
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'qwentts-' + new Date().toISOString().replace(/[:.]/g, '-') + '.wav';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    }
+
+    function startSpeaking() {
+        var text = textInput.value.trim();
+        if (!text) return;
+
+        if (eventSource) { eventSource.close(); eventSource = null; }
+        resetAudio();
+        hideError();
+
+        totalSentences = 0;
+        completedSentences = 0;
+        scheduledTime = 0;
+        audioChunks = [];
+        downloadBtn.style.display = 'none';
+
+        showSentences(text);
+        progressFill.style.width = '0%';
+        setStatus('Connecting…', 'busy');
+
+        speakBtn.disabled = true;
+        speakBtn.style.display = 'none';
+        stopBtn.style.display = 'inline-flex';
+        textInput.disabled = true;
+        instructionsInput.disabled = true;
+
+        var voice = voiceSelect.value;
+        var instructions = instructionsInput.value.trim();
+        var url = '/speak?text=' + encodeURIComponent(text);
+        if (voice) url += '&voice=' + encodeURIComponent(voice);
+        if (instructions) url += '&instructions=' + encodeURIComponent(instructions);
+
+        var es = new EventSource(url);
+        eventSource = es;
+
+        es.addEventListener('meta', function (e) {
+            var data = JSON.parse(e.data);
+            totalSentences = data.total;
+            setStatus('0 / ' + totalSentences + ' sentences', 'busy');
+        });
+
+        es.addEventListener('start', function (e) {
+            var data = JSON.parse(e.data);
+            setSentenceState(data.index, 'active');
+            setStatus((data.index + 1) + ' / ' + totalSentences + ' sentences', 'busy');
+        });
+
+        es.addEventListener('audio', function (e) {
+            var data = JSON.parse(e.data);
+            audioChunks.push(data.data);
+            playAudio(data.data);
+        });
+
+        es.addEventListener('done', function (e) {
+            var data = JSON.parse(e.data);
+            setSentenceState(data.index, 'done');
+            completedSentences++;
+            updateProgress();
+        });
+
+        es.addEventListener('notice', function (e) {
+            try {
+                var data = JSON.parse(e.data);
+                setStatus(data.message || 'Note', '');
+            } catch (_) {}
+        });
+
+        es.addEventListener('error', function (e) {
+            if (e.data && e.data !== '') {
+                try {
+                    var data = JSON.parse(e.data);
+                    setSentenceState(data.index, 'error');
+                    completedSentences++;
+                    updateProgress();
+                    showError(data.message || 'TTS error');
+                    setStatus('Error at sentence ' + (data.index + 1), 'error');
+                } catch (_) {}
+            } else {
+                // EventSource error event (connection issue, not SSE error event)
+                showError('Connection to backend failed. Make sure the webui server is running.');
+                setStatus('Connection error', 'error');
+                finishSpeaking();
+            }
+        });
+
+        es.addEventListener('complete', function () {
+            setStatus('Done — ' + totalSentences + ' sentences', '');
+            finishSpeaking();
+        });
+    }
+
+    function finishSpeaking() {
+        if (eventSource) { eventSource.close(); eventSource = null; }
+        speakBtn.disabled = false;
+        speakBtn.style.display = 'inline-flex';
+        stopBtn.style.display = 'none';
+        textInput.disabled = false;
+        instructionsInput.disabled = false;
+        if (audioChunks.length) {
+            downloadBtn.style.display = 'inline-flex';
+        }
+    }
+
+    function stopSpeaking() {
+        fetch('/cancel', { method: 'POST' }).catch(function(){});
+        if (eventSource) { eventSource.close(); eventSource = null; }
+        audioChunks = [];
+        downloadBtn.style.display = 'none';
+        resetAudio();
+        finishSpeaking();
+        setStatus('Stopped', '');
+    }
+
+    speakBtn.addEventListener('click', startSpeaking);
+    stopBtn.addEventListener('click', stopSpeaking);
+    downloadBtn.addEventListener('click', downloadAudio);
+
+    textInput.addEventListener('input', function () {
+        if (!eventSource) showSentences(this.value);
+    });
+
+    showSentences(textInput.value);
+    setStatus('Ready', '');
+
+    fetch('/v1/voices').then(function (r) { return r.json(); }).then(function (voices) {
+        if (Array.isArray(voices) && voices.length) {
+            for (var i = 0; i < voices.length; i++) {
+                var opt = document.createElement('option');
+                opt.value = voices[i];
+                opt.textContent = voices[i];
+                voiceSelect.appendChild(opt);
+            }
+        }
+    }).catch(function () {});
+
+    window.addEventListener('beforeunload', function () {
+        if (eventSource) eventSource.close();
+        if (audioCtx) audioCtx.close().catch(function(){});
+    });
+})();
+</script>
+</body>
+</html>
