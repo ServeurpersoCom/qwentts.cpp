@@ -14,11 +14,11 @@
 #include "ggml.h"
 #include "gguf-weights.h"
 #include "kv-cache.h"
+#include "qt-error.h"
 #include "weight-ctx.h"
 
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -87,7 +87,7 @@ static bool tok_trans_load(QwenTokenizerTransformer * tr, const GGUFModel & gf, 
     tr->rms_norm_eps        = gf_get_f32(gf, "qwen3-tts-tokenizer.decoder.rms_norm_eps");
 
     if (num_layers == 0 || num_layers > (uint32_t) TOK_TRANS_MAX_LAYERS) {
-        fprintf(stderr, "[Transformer] FATAL: invalid layer count %u (max %d)\n", num_layers, TOK_TRANS_MAX_LAYERS);
+        qt_log(QT_LOG_ERROR, "[Transformer] FATAL: invalid layer count %u (max %d)", num_layers, TOK_TRANS_MAX_LAYERS);
         return false;
     }
 
@@ -137,17 +137,17 @@ static bool tok_trans_load(QwenTokenizerTransformer * tr, const GGUFModel & gf, 
     }
 
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[Transformer] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[Transformer] FATAL: backend allocation failed");
         return false;
     }
     tr->weight_ctx = wctx.ctx;
     tr->weight_buf = wctx.buffer;
 
-    fprintf(stderr,
-            "[Transformer] Loaded: %d layers, hidden %d, heads %d/%d, head_dim %d, "
-            "FFN %d, RoPE theta %.0f, sliding window %d\n",
-            tr->num_layers, tr->hidden_size, tr->num_attention_heads, tr->num_kv_heads, tr->head_dim,
-            tr->intermediate_size, tr->rope_theta, tr->sliding_window);
+    qt_log(QT_LOG_INFO,
+           "[Transformer] Loaded: %d layers, hidden %d, heads %d/%d, head_dim %d, "
+           "FFN %d, RoPE theta %.0f, sliding window %d",
+           tr->num_layers, tr->hidden_size, tr->num_attention_heads, tr->num_kv_heads, tr->head_dim,
+           tr->intermediate_size, tr->rope_theta, tr->sliding_window);
     return true;
 }
 

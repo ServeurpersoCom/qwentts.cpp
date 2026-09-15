@@ -11,7 +11,6 @@
 #include "ggml-backend.h"
 #include "qt-error.h"
 
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -80,14 +79,13 @@ static void qt_ggml_log(enum ggml_log_level level, const char * text, void * use
     }
 
     if (count > 1) {
-        fprintf(stderr, "[Dedup] Previous line repeated %d times total\n", count);
+        qt_log(QT_LOG_DEBUG, "[Dedup] Previous line repeated %d times total", count);
     }
 
-    fputs(text, stderr);
+    qt_log(QT_LOG_DEBUG, "%s", text);
     strncpy(last, text, sizeof(last) - 1);
     last[sizeof(last) - 1] = 0;
     count                  = 1;
-    fflush(stderr);
 }
 
 static BackendPair backend_init(const char * label) {

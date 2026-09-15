@@ -4,10 +4,10 @@
 // dump.
 // File format: [int32 ndims] [int32 dim0] [int32 dim1] ... [float data...]
 
+#include "qt-error.h"
 #include "utf8.h"
 
 #include <cstdint>
-#include <cstdio>
 #include <vector>
 
 struct DebugDumper {
@@ -37,7 +37,7 @@ static void debug_dump(const DebugDumper * d, const char * name, const float * d
     }
     FILE * f = utf8_fopen(path, "wb");
     if (!f) {
-        fprintf(stderr, "[Debug] cannot write %s\n", path);
+        qt_log(QT_LOG_ERROR, "[Debug] cannot write %s", path);
         return;
     }
     fwrite(&ndims, sizeof(int32_t), 1, f);
@@ -45,16 +45,19 @@ static void debug_dump(const DebugDumper * d, const char * name, const float * d
     fwrite(data, sizeof(float), numel, f);
     fclose(f);
 
-    // First 4 values for quick sanity check on stderr.
-    fprintf(stderr, "[Debug] %s: [", name);
+    // First 4 values for quick sanity check via qt_log.
+    char   shape_str[256];
+    int    shape_pos = 0;
+    shape_pos += snprintf(shape_str + shape_pos, sizeof(shape_str) - (size_t) shape_pos, "[Debug] %s: [", name);
     for (int i = 0; i < ndims; i++) {
-        fprintf(stderr, "%s%d", i ? ", " : "", shape[i]);
+        shape_pos +=
+            snprintf(shape_str + shape_pos, sizeof(shape_str) - (size_t) shape_pos, "%s%d", i ? ", " : "", shape[i]);
     }
-    fprintf(stderr, "] first4:");
+    shape_pos += snprintf(shape_str + shape_pos, sizeof(shape_str) - (size_t) shape_pos, "] first4:");
     for (int i = 0; i < 4 && i < numel; i++) {
-        fprintf(stderr, " %.6f", data[i]);
+        shape_pos += snprintf(shape_str + shape_pos, sizeof(shape_str) - (size_t) shape_pos, " %.6f", data[i]);
     }
-    fprintf(stderr, "\n");
+    qt_log(QT_LOG_DEBUG, "%s", shape_str);
 }
 
 // Convenience: dump 1D tensor [n].
