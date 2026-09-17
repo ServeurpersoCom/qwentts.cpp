@@ -132,7 +132,7 @@ int main(int argc, char ** argv) {
     utf8_init(&argc, &argv);
     if (argc <= 1) {
         print_usage(argv[0]);
-        return 0;
+        return 1;
     }
 
     const char * model_path  = NULL;
@@ -153,11 +153,7 @@ int main(int argc, char ** argv) {
                 print_usage(argv[0]);
                 return 1;
             }
-        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            print_usage(argv[0]);
-            return 0;
         } else {
-            fprintf(stderr, "[CLI] ERROR: unknown arg: %s\n", argv[i]);
             print_usage(argv[0]);
             return 1;
         }

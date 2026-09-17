@@ -185,9 +185,6 @@ static bool parse_args(int argc, char ** argv, Args & a) {
     qt_tts_default_params(&a.tts);
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
-        if (std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--help") == 0) {
-            return false;
-        }
         if (std::strcmp(arg, "--model") == 0 && i + 1 < argc) {
             a.model = argv[++i];
         } else if (std::strcmp(arg, "--codec") == 0 && i + 1 < argc) {
@@ -246,7 +243,6 @@ static bool parse_args(int argc, char ** argv, Args & a) {
         } else if (std::strcmp(arg, "-o") == 0 && i + 1 < argc) {
             a.out_wav = argv[++i];
         } else {
-            fprintf(stderr, "[CLI] ERROR: unknown or incomplete argument: %s\n", arg);
             return false;
         }
     }

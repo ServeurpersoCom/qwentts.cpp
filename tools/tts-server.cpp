@@ -99,11 +99,7 @@ int main(int argc, char ** argv) {
             max_batch = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--codec-chunk-dur") && i + 1 < argc) {
             codec_chunk_dur = (float) std::atof(argv[++i]);
-        } else if (!std::strcmp(arg, "--help") || !std::strcmp(arg, "-h")) {
-            print_usage(argv[0]);
-            return 0;
         } else {
-            fprintf(stderr, "[CLI] ERROR: unknown arg: %s\n", arg);
             print_usage(argv[0]);
             return 1;
         }
@@ -111,7 +107,7 @@ int main(int argc, char ** argv) {
 
     if (!talker_path || !codec_path) {
         print_usage(argv[0]);
-        return 0;
+        return 1;
     }
 
     struct qt_init_params iparams;
