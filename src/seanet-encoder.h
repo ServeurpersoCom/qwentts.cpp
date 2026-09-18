@@ -24,9 +24,9 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "qt-error.h"
 #include "weight-ctx.h"
 
-#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -92,8 +92,8 @@ static bool seanet_encoder_load(QwenSEANetEncoder * s, const GGUFModel & gf, ggm
     {
         const auto & arr = gf_get_array_u32(gf, "qwen3-tts-tokenizer.encoder.upsampling_ratios");
         if ((int) arr.size() != SEANET_NUM_STAGES) {
-            fprintf(stderr, "[SEANet] FATAL: upsampling_ratios has %d entries, expected %d\n", (int) arr.size(),
-                    SEANET_NUM_STAGES);
+            qt_log(QT_LOG_ERROR, "[SEANet] FATAL: upsampling_ratios has %d entries, expected %d", (int) arr.size(),
+                   SEANET_NUM_STAGES);
             return false;
         }
         for (int i = 0; i < SEANET_NUM_STAGES; i++) {
@@ -145,17 +145,16 @@ static bool seanet_encoder_load(QwenSEANetEncoder * s, const GGUFModel & gf, ggm
     s->last_b = gf_load_tensor(&wctx, gf, "tok_enc.conv.14.bias");
 
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[SEANet] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[SEANet] FATAL: backend allocation failed");
         return false;
     }
     s->weight_ctx = wctx.ctx;
     s->weight_buf = wctx.buffer;
 
-    fprintf(stderr,
-            "[SEANet] Loaded: 4 stages (ratios %d/%d/%d/%d), %d -> %d channels, "
-            "weights %.1f MB\n",
-            ratios[0], ratios[1], ratios[2], ratios[3], s->num_filters, s->hidden_size,
-            (float) ggml_backend_buffer_get_size(s->weight_buf) / (1024.0f * 1024.0f));
+    qt_log(QT_LOG_INFO,
+           "[SEANet] Loaded: 4 stages (ratios %d/%d/%d/%d), %d -> %d channels, weights %.1f MB",
+           ratios[0], ratios[1], ratios[2], ratios[3], s->num_filters, s->hidden_size,
+           (float) ggml_backend_buffer_get_size(s->weight_buf) / (1024.0f * 1024.0f));
     return true;
 }
 

@@ -17,7 +17,6 @@
 #include "qt-error.h"
 #include "weight-ctx.h"
 
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -83,7 +82,7 @@ static bool gf_load(GGUFModel * gf, const char * path) {
     gf->fh =
         CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (gf->fh == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "[GGUF] Cannot open %s\n", path);
+        qt_log(QT_LOG_ERROR, "[GGUF] Cannot open %s", path);
         return false;
     }
     LARGE_INTEGER li;
@@ -92,20 +91,20 @@ static bool gf_load(GGUFModel * gf, const char * path) {
     gf->mh        = CreateFileMappingW(gf->fh, NULL, PAGE_READONLY, 0, 0, NULL);
     if (!gf->mh) {
         CloseHandle(gf->fh);
-        fprintf(stderr, "[GGUF] CreateFileMapping failed %s\n", path);
+        qt_log(QT_LOG_ERROR, "[GGUF] CreateFileMapping failed %s", path);
         return false;
     }
     gf->mapping = (uint8_t *) MapViewOfFile(gf->mh, FILE_MAP_READ, 0, 0, 0);
     if (!gf->mapping) {
         CloseHandle(gf->mh);
         CloseHandle(gf->fh);
-        fprintf(stderr, "[GGUF] MapViewOfFile failed %s\n", path);
+        qt_log(QT_LOG_ERROR, "[GGUF] MapViewOfFile failed %s", path);
         return false;
     }
 #else
     gf->fd = open(path, O_RDONLY);
     if (gf->fd < 0) {
-        fprintf(stderr, "[GGUF] Cannot open %s\n", path);
+        qt_log(QT_LOG_ERROR, "[GGUF] Cannot open %s", path);
         return false;
     }
     struct stat sb;
@@ -115,7 +114,7 @@ static bool gf_load(GGUFModel * gf, const char * path) {
     if (gf->mapping == MAP_FAILED) {
         close(gf->fd);
         gf->mapping = NULL;
-        fprintf(stderr, "[GGUF] Mmap failed %s\n", path);
+        qt_log(QT_LOG_ERROR, "[GGUF] Mmap failed %s", path);
         return false;
     }
 #endif
@@ -125,7 +124,7 @@ static bool gf_load(GGUFModel * gf, const char * path) {
     struct gguf_init_params params = { /*no_alloc=*/true, /*ctx=*/&meta };
     gf->gguf                       = gguf_init_from_file(path, params);
     if (!gf->gguf) {
-        fprintf(stderr, "[GGUF] Failed to parse %s\n", path);
+        qt_log(QT_LOG_ERROR, "[GGUF] Failed to parse %s", path);
         gf_close(gf);
         return false;
     }
@@ -144,17 +143,17 @@ static bool gf_load(GGUFModel * gf, const char * path) {
         size_t               tsize = ggml_nbytes(t);
         size_t               end   = gf->data_offset + toff + tsize;
         if (end > gf->file_size) {
-            fprintf(stderr,
-                    "[GGUF] FATAL: '%s' is truncated or corrupt.\n"
-                    "       tensor '%s' needs bytes [%zu..%zu) but file is only %zu bytes.\n"
-                    "       Re-download the file and verify its size or checksum.\n",
-                    path, tname, gf->data_offset + toff, end, gf->file_size);
+            qt_log(QT_LOG_ERROR,
+                   "[GGUF] FATAL: '%s' is truncated or corrupt. "
+                   "tensor '%s' needs bytes [%zu..%zu) but file is only %zu bytes. "
+                   "Re-download the file and verify its size or checksum.",
+                   path, tname, gf->data_offset + toff, end, gf->file_size);
             gf_close(gf);
             return false;
         }
     }
 
-    fprintf(stderr, "[GGUF] %s: %lld tensors, data at offset %zu\n", path, (long long) n, gf->data_offset);
+    qt_log(QT_LOG_INFO, "[GGUF] %s: %lld tensors, data at offset %zu", path, (long long) n, gf->data_offset);
     return true;
 }
 
@@ -233,8 +232,8 @@ static struct ggml_tensor * gf_load_tensor_f32(WeightCtx * wctx, const GGUFModel
 
     // Bail early on unsupported types (before creating tensor in ctx)
     if (src->type != GGML_TYPE_BF16 && src->type != GGML_TYPE_F16) {
-        fprintf(stderr, "[GGUF] WARNING: gf_load_tensor_f32 unsupported type %d for '%s', loading as-is\n", src->type,
-                name.c_str());
+        qt_log(QT_LOG_WARN, "[GGUF] WARNING: gf_load_tensor_f32 unsupported type %d for '%s', loading as-is", src->type,
+               name.c_str());
         return gf_load_tensor(wctx, gf, name);
     }
 

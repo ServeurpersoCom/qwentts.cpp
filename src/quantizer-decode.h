@@ -15,7 +15,6 @@
 #include "qt-error.h"
 #include "weight-ctx.h"
 
-#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -68,7 +67,7 @@ static bool quant_decoder_load(QwenQuantizerDecoder * dec, const GGUFModel & gf,
     dec->hidden                  = (int) gf_get_u32(gf, "qwen3-tts-tokenizer.decoder.vector_quantization_hidden_dim");
 
     if (dec->num_acoustic_quantizers > RVQ_MAX_CODEBOOKS_PER_GROUP) {
-        fprintf(stderr, "[Quantizer] FATAL: %d acoustic codebooks exceeds compile-time max %d\n",
+        qt_log(QT_LOG_ERROR, "[Quantizer] FATAL: %d acoustic codebooks exceeds compile-time max %d",
                 dec->num_acoustic_quantizers, RVQ_MAX_CODEBOOKS_PER_GROUP);
         return false;
     }
@@ -96,17 +95,17 @@ static bool quant_decoder_load(QwenQuantizerDecoder * dec, const GGUFModel & gf,
     }
 
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[Quantizer] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[Quantizer] FATAL: backend allocation failed");
         return false;
     }
     dec->weight_ctx = wctx.ctx;
     dec->weight_buf = wctx.buffer;
 
-    fprintf(stderr,
-            "[Quantizer] Loaded: %d codebooks (%d semantic + %d acoustic), "
-            "%d entries x %d dim, hidden %d\n",
-            dec->num_quantizers, dec->num_semantic_quantizers, dec->num_acoustic_quantizers, dec->codebook_size,
-            dec->codebook_dim_internal, dec->hidden);
+    qt_log(QT_LOG_INFO,
+           "[Quantizer] Loaded: %d codebooks (%d semantic + %d acoustic), "
+           "%d entries x %d dim, hidden %d",
+           dec->num_quantizers, dec->num_semantic_quantizers, dec->num_acoustic_quantizers, dec->codebook_size,
+           dec->codebook_dim_internal, dec->hidden);
     return true;
 }
 
@@ -150,8 +149,8 @@ static struct ggml_tensor * quant_decode(struct ggml_context *        ctx,
                                          struct ggml_tensor *         codes) {
     int T = (int) codes->ne[0];
     if ((int) codes->ne[1] != dec->num_quantizers) {
-        fprintf(stderr, "[Quantizer] FATAL: codes ne[1]=%lld != num_quantizers=%d\n", (long long) codes->ne[1],
-                dec->num_quantizers);
+        qt_log(QT_LOG_ERROR, "[Quantizer] FATAL: codes ne[1]=%lld != num_quantizers=%d", (long long) codes->ne[1],
+               dec->num_quantizers);
         return NULL;
     }
 
