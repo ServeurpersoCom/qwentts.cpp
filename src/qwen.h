@@ -384,6 +384,16 @@ QT_API int qt_n_speakers(const struct qt_context * q);
 // i is out of range. The pointer stays valid until qt_free. UTF-8.
 QT_API const char * qt_speaker_name(const struct qt_context * q, int i);
 
+// Number of languages the loaded model carries in its codec table. The
+// synthesis also accepts "auto", which is not part of this list: it inserts
+// no language id and lets the model infer one from the text.
+QT_API int qt_n_languages(const struct qt_context * q);
+
+// Name of language i, valid for i in [0, qt_n_languages). Returns NULL when
+// i is out of range. The pointer stays valid until qt_free. Lowercase ASCII,
+// the spelling qt_tts_params.lang expects.
+QT_API const char * qt_language_name(const struct qt_context * q, int i);
+
 // Model type of the loaded talker: "base", "custom_voice" or
 // "voice_design". Voice references are only valid on "base". The pointer
 // stays valid until qt_free.

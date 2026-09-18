@@ -743,6 +743,21 @@ const char * qt_speaker_name(const struct qt_context * q, int i) {
     return q->pt.speakers[(size_t) i].name.c_str();
 }
 
+int qt_n_languages(const struct qt_context * q) {
+    if (!q) {
+        qt_set_error("qt_n_languages: q is NULL");
+        return 0;
+    }
+    return (int) q->pt.languages.size();
+}
+
+const char * qt_language_name(const struct qt_context * q, int i) {
+    if (!q || i < 0 || i >= (int) q->pt.languages.size()) {
+        return NULL;
+    }
+    return q->pt.languages[(size_t) i].name.c_str();
+}
+
 const char * qt_model_type(const struct qt_context * q) {
     if (!q) {
         qt_set_error("qt_model_type: q is NULL");
