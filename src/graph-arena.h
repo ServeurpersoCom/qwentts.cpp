@@ -6,6 +6,7 @@
 // every decode step instead of thrashing on fresh allocations.
 
 #include "ggml.h"
+#include "qt-error.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -21,7 +22,7 @@ static bool graph_arena_init(GraphArena * a, int max_nodes) {
     struct ggml_init_params gp = { bytes, NULL, true };
     a->ctx                     = ggml_init(gp);
     if (!a->ctx) {
-        fprintf(stderr, "[GraphArena] FATAL: ggml_init failed (%zu bytes)\n", bytes);
+        qt_log(QT_LOG_ERROR, "[GraphArena] FATAL: ggml_init failed (%zu bytes)", bytes);
         return false;
     }
     return true;

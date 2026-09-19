@@ -48,10 +48,9 @@ void qt_set_error_v(const char * fmt, va_list ap);
     ;
 
 // Routes a formatted message at the requested level to the installed
-// qt_log_cb. Defaults to stderr (with a trailing newline) when no
-// callback is set, so existing fprintf-style call sites can migrate
-// one at a time without changing user-visible behaviour. printf
-// semantics; messages longer than the internal buffer are truncated.
+// qt_log_cb, or to stderr with a trailing newline when no callback is set.
+// Every diagnostic of the library goes through here, ggml's included, so a
+// host that installs a callback gets all of them. printf semantics.
 void qt_log(enum qt_log_level level, const char * fmt, ...)
 #if defined(__GNUC__) || defined(__clang__)
     __attribute__((format(printf, 2, 3)))

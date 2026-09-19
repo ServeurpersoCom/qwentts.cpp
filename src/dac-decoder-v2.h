@@ -191,14 +191,14 @@ static bool dac_decoder_load(QwenDACDecoder * d, const GGUFModel & gf, ggml_back
     d->conv_post_b = gf_load_tensor(&wctx, gf, "tok_dec.dec.6.conv.bias");
 
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[DAC] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[DAC] FATAL: backend allocation failed");
         return false;
     }
     d->weight_ctx = wctx.ctx;
     d->weight_buf = wctx.buffer;
 
-    fprintf(stderr, "[DAC] Loaded: %d blocks (strides 8/5/4/3), 24 kHz mono out, weights %.1f MB\n", DAC_NUM_BLOCKS,
-            (float) ggml_backend_buffer_get_size(d->weight_buf) / (1024.0f * 1024.0f));
+    qt_log(QT_LOG_INFO, "[DAC] Loaded: %d blocks (strides 8/5/4/3), 24 kHz mono out, weights %.1f MB", DAC_NUM_BLOCKS,
+           (float) ggml_backend_buffer_get_size(d->weight_buf) / (1024.0f * 1024.0f));
     return true;
 }
 

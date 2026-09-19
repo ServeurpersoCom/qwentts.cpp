@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -69,25 +70,35 @@ static ggml_backend_t cpu_backend_new(int n_threads) {
 // Collapse exact consecutive duplicate ggml log lines and report the total
 // count when the run ends (tames the CUDA graph capture "reused" flood).
 static void qt_ggml_log(enum ggml_log_level level, const char * text, void * user_data) {
-    (void) level;
     (void) user_data;
-    static char last[256] = { 0 };
-    static int  count     = 0;
+    // ggml may hand a line over in pieces: the pieces gather until the line
+    // ends, and each whole line goes out once through qt_log, tagged, with a
+    // run of identical lines collapsed into a count.
+    static std::mutex  mutex;
+    static std::string pending;
+    static std::string last;
+    static int         count = 0;
 
-    if (count > 0 && strcmp(text, last) == 0) {
-        count++;
-        return;
+    std::lock_guard<std::mutex> lock(mutex);
+    pending += text;
+    size_t end;
+    while ((end = pending.find('\n')) != std::string::npos) {
+        const std::string line = pending.substr(0, end);
+        pending.erase(0, end + 1);
+        if (count > 0 && line == last) {
+            count++;
+            continue;
+        }
+        if (count > 1) {
+            qt_log(QT_LOG_INFO, "[Dedup] Previous line repeated %d times total", count);
+        }
+        qt_log(level == GGML_LOG_LEVEL_ERROR ? QT_LOG_ERROR :
+               level == GGML_LOG_LEVEL_WARN  ? QT_LOG_WARN :
+                                               QT_LOG_INFO,
+               "[GGML] %s", line.c_str());
+        last  = line;
+        count = 1;
     }
-
-    if (count > 1) {
-        fprintf(stderr, "[Dedup] Previous line repeated %d times total\n", count);
-    }
-
-    fputs(text, stderr);
-    strncpy(last, text, sizeof(last) - 1);
-    last[sizeof(last) - 1] = 0;
-    count                  = 1;
-    fflush(stderr);
 }
 
 static BackendPair backend_init(const char * label) {

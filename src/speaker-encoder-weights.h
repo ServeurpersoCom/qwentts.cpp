@@ -23,6 +23,7 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "qt-error.h"
 #include "weight-ctx.h"
 
 #include <cstdint>
@@ -159,7 +160,7 @@ static bool speaker_encoder_weights_load(SpeakerEncoderWeights * sw, const GGUFM
     // Probe: Base GGUFs ship the speaker encoder, CustomVoice and
     // VoiceDesign do not. A missing conv0.weight aborts cleanly.
     if (gguf_find_tensor(gf.gguf, "spk_enc.conv0.weight") < 0) {
-        fprintf(stderr, "[SpeakerEncoder] No spk_enc.conv0.weight, base/clone mode unavailable\n");
+        qt_log(QT_LOG_INFO, "[SpeakerEncoder] No spk_enc.conv0.weight, base/clone mode unavailable");
         sw->weight_ctx = NULL;
         sw->weight_buf = NULL;
         return true;
@@ -183,16 +184,16 @@ static bool speaker_encoder_weights_load(SpeakerEncoderWeights * sw, const GGUFM
     sw->fc_b       = spk_load(&wctx, gf, "spk_enc.fc.bias");
 
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[SpeakerEncoder] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[SpeakerEncoder] FATAL: backend allocation failed");
         return false;
     }
     sw->weight_ctx = wctx.ctx;
     sw->weight_buf = wctx.buffer;
 
-    fprintf(stderr,
-            "[SpeakerEncoder] Loaded: enc_dim=%d sr=%d mel_dim=%d hidden=%d mfa=%d asp_attn=%d se=%d scale=%d\n",
-            sw->enc_dim, sw->sample_rate, sw->mel_dim, sw->hidden, sw->mfa_hidden, sw->asp_attn, sw->se_channels,
-            sw->res2net_scale);
+    qt_log(QT_LOG_INFO,
+           "[SpeakerEncoder] Loaded: enc_dim=%d sr=%d mel_dim=%d hidden=%d mfa=%d asp_attn=%d se=%d scale=%d",
+           sw->enc_dim, sw->sample_rate, sw->mel_dim, sw->hidden, sw->mfa_hidden, sw->asp_attn, sw->se_channels,
+           sw->res2net_scale);
     return true;
 }
 

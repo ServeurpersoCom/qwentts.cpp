@@ -15,6 +15,7 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "qt-error.h"
 #include "weight-ctx.h"
 
 #include <cstdio>
@@ -58,8 +59,8 @@ static bool upsample_stage_load(QwenUpsampleStage * stage, const GGUFModel & gf,
     stage->num_blocks     = 2;
 
     if (stage->num_blocks > UPSAMPLE_MAX_BLOCKS) {
-        fprintf(stderr, "[Upsample] FATAL: %d blocks exceeds compile-time max %d\n", stage->num_blocks,
-                UPSAMPLE_MAX_BLOCKS);
+        qt_log(QT_LOG_ERROR, "[Upsample] FATAL: %d blocks exceeds compile-time max %d", stage->num_blocks,
+               UPSAMPLE_MAX_BLOCKS);
         return false;
     }
 
@@ -97,16 +98,16 @@ static bool upsample_stage_load(QwenUpsampleStage * stage, const GGUFModel & gf,
     }
 
     if (!wctx_alloc(&wctx, backend)) {
-        fprintf(stderr, "[Upsample] FATAL: backend allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[Upsample] FATAL: backend allocation failed");
         return false;
     }
     stage->weight_ctx = wctx.ctx;
     stage->weight_buf = wctx.buffer;
 
-    fprintf(stderr,
-            "[Upsample] Loaded: %d blocks (%dx ratio per block), channels %d, "
-            "dwconv kernel %d\n",
-            stage->num_blocks, stage->upsample_ratio, stage->channels, stage->dwconv_kernel);
+    qt_log(QT_LOG_INFO,
+           "[Upsample] Loaded: %d blocks (%dx ratio per block), channels %d, "
+           "dwconv kernel %d",
+           stage->num_blocks, stage->upsample_ratio, stage->channels, stage->dwconv_kernel);
     return true;
 }
 

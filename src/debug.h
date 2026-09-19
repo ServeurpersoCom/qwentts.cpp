@@ -4,10 +4,12 @@
 // dump.
 // File format: [int32 ndims] [int32 dim0] [int32 dim1] ... [float data...]
 
+#include "qt-error.h"
 #include "utf8.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 struct DebugDumper {
@@ -37,7 +39,7 @@ static void debug_dump(const DebugDumper * d, const char * name, const float * d
     }
     FILE * f = utf8_fopen(path, "wb");
     if (!f) {
-        fprintf(stderr, "[Debug] cannot write %s\n", path);
+        qt_log(QT_LOG_ERROR, "[Debug] Cannot write %s", path);
         return;
     }
     fwrite(&ndims, sizeof(int32_t), 1, f);
@@ -45,16 +47,19 @@ static void debug_dump(const DebugDumper * d, const char * name, const float * d
     fwrite(data, sizeof(float), numel, f);
     fclose(f);
 
-    // First 4 values for quick sanity check on stderr.
-    fprintf(stderr, "[Debug] %s: [", name);
+    // First 4 values for a quick sanity check, one log line.
+    std::string line = std::string("[Debug] ") + name + ": [";
+    char        buf[32];
     for (int i = 0; i < ndims; i++) {
-        fprintf(stderr, "%s%d", i ? ", " : "", shape[i]);
+        snprintf(buf, sizeof(buf), "%s%d", i ? ", " : "", shape[i]);
+        line += buf;
     }
-    fprintf(stderr, "] first4:");
+    line += "] first4:";
     for (int i = 0; i < 4 && i < numel; i++) {
-        fprintf(stderr, " %.6f", data[i]);
+        snprintf(buf, sizeof(buf), " %.6f", data[i]);
+        line += buf;
     }
-    fprintf(stderr, "\n");
+    qt_log(QT_LOG_INFO, "%s", line.c_str());
 }
 
 // Convenience: dump 1D tensor [n].

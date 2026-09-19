@@ -22,6 +22,7 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml.h"
+#include "qt-error.h"
 #include "speaker-encoder-forward.h"
 #include "speaker-encoder-weights.h"
 
@@ -42,11 +43,11 @@ static bool speaker_encoder_extract(const SpeakerEncoderWeights * sw,
                                     std::vector<float> &          emb_out,
                                     const char *                  dump_dir = NULL) {
     if (sw->weight_buf == NULL) {
-        fprintf(stderr, "[SpkExtract] FATAL: speaker encoder weights not loaded\n");
+        qt_log(QT_LOG_ERROR, "[SpkExtract] FATAL: speaker encoder weights not loaded");
         return false;
     }
     if (!audio || n_samples <= 0) {
-        fprintf(stderr, "[SpkExtract] FATAL: empty audio buffer\n");
+        qt_log(QT_LOG_ERROR, "[SpkExtract] FATAL: empty audio buffer");
         return false;
     }
 
@@ -64,7 +65,7 @@ static bool speaker_encoder_extract(const SpeakerEncoderWeights * sw,
     const int pad   = (mel_cfg.n_fft - mel_cfg.hop) / 2;  // 384
     const int T_pad = T_in + 2 * pad;
     if (T_in < pad + 1) {
-        fprintf(stderr, "[SpkExtract] FATAL: audio too short (%d samples) for reflect pad %d\n", T_in, pad);
+        qt_log(QT_LOG_ERROR, "[SpkExtract] FATAL: audio too short (%d samples) for reflect pad %d", T_in, pad);
         return false;
     }
 
@@ -203,7 +204,7 @@ static bool speaker_encoder_extract(const SpeakerEncoderWeights * sw,
     // a residual graph state from a previous synthesis call.
     ggml_backend_sched_reset(sched);
     if (!ggml_backend_sched_alloc_graph(sched, graph)) {
-        fprintf(stderr, "[SpkExtract] FATAL: graph allocation failed\n");
+        qt_log(QT_LOG_ERROR, "[SpkExtract] FATAL: graph allocation failed");
         ggml_free(gctx);
         return false;
     }
@@ -216,7 +217,7 @@ static bool speaker_encoder_extract(const SpeakerEncoderWeights * sw,
     ggml_backend_tensor_set(mel_b_in, mel_c.mel_basis.data(), 0, mel_c.mel_basis.size() * sizeof(float));
 
     if (ggml_backend_sched_graph_compute(sched, graph) != GGML_STATUS_SUCCESS) {
-        fprintf(stderr, "[SpkExtract] FATAL: graph compute failed\n");
+        qt_log(QT_LOG_ERROR, "[SpkExtract] FATAL: graph compute failed");
         ggml_backend_sched_reset(sched);
         ggml_free(gctx);
         return false;
@@ -286,6 +287,6 @@ static bool speaker_encoder_extract(const SpeakerEncoderWeights * sw,
     ggml_backend_sched_reset(sched);
     ggml_free(gctx);
 
-    fprintf(stderr, "[SpkExtract] Extracted %d-dim embedding (%d samples, padded %d)\n", sw->enc_dim, T_in, T_pad);
+    qt_log(QT_LOG_INFO, "[SpkExtract] Extracted %d-dim embedding (%d samples, padded %d)", sw->enc_dim, T_in, T_pad);
     return true;
 }

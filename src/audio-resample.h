@@ -1,4 +1,5 @@
 #pragma once
+#include "qt-error.h"
 // audio-resample.h: torchaudio.functional.resample compatible reimplementation.
 // Hann-windowed sinc interpolation with rolloff=0.99 and lowpass_filter_width=6,
 // matching torchaudio defaults bit for bit.
@@ -136,7 +137,7 @@ static float * audio_resample(const float * in, int n_in, int sr_in, int sr_out,
         size_t  sz  = (size_t) n_in * (size_t) nch * sizeof(float);
         float * out = (float *) malloc(sz);
         if (!out) {
-            fprintf(stderr, "[Audio-Resample] OOM passthrough buffer (%zu bytes)\n", sz);
+            qt_log(QT_LOG_INFO, "[Resample] OOM passthrough buffer (%zu bytes)", sz);
             *n_out = 0;
             return NULL;
         }
@@ -162,7 +163,7 @@ static float * audio_resample(const float * in, int n_in, int sr_in, int sr_out,
 
     float * out = (float *) malloc((size_t) target * (size_t) nch * sizeof(float));
     if (!out) {
-        fprintf(stderr, "[Audio-Resample] OOM output buffer\n");
+        qt_log(QT_LOG_INFO, "[Resample] OOM output buffer");
         *n_out = 0;
         return NULL;
     }
