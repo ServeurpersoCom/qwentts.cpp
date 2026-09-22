@@ -630,7 +630,7 @@ Optional:
   --alias <name>          Report this model id instead of the GGUF file name
   --host <ip>             Listen address (default: 127.0.0.1)
   --port <n>              Listen port (default: 8080)
-  --lang <n>              Language label (default: auto)
+  --lang <name>           Language label when a request omits one (default: auto)
   --no-fa                 Disable flash attention
   --clamp-fp16            Clamp hidden states to FP16 range
 ```
@@ -641,6 +641,8 @@ Endpoints :
 POST   /v1/audio/speech         OAI text-to-speech; response_format "pcm"
                                 streams s16le 24 kHz mono chunked as it is
                                 generated, "wav" returns a one-shot RIFF file.
+                                language overrides --lang for this request,
+                                an unknown one is a 400.
                                 Optional sampling overrides ride in the same
                                 body, one set per stack: seed, max_new_tokens,
                                 temperature, top_k, top_p, repetition_penalty

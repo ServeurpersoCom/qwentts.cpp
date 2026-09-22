@@ -45,6 +45,7 @@
 // One synthesis request parsed from the OAI JSON body.
 struct tts_request {
     std::string input;         // text to speak
+    std::string lang;          // language label, empty keeps the server default
     std::string voice;         // OAI voice, mapped to a speaker by the adapter
     std::string instructions;  // OAI instructions, mapped to the ABI instruct field
     std::string format;        // "pcm" (stream) or "wav" (one-shot)
@@ -187,6 +188,9 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
 
     yyjson_val * voice = yyjson_obj_get(root, "voice");
     req.voice          = yyjson_is_str(voice) ? tts_voice_name(yyjson_get_str(voice)) : "";
+
+    yyjson_val * language = yyjson_obj_get(root, "language");
+    req.lang              = yyjson_is_str(language) ? yyjson_get_str(language) : "";
 
     yyjson_val * instructions = yyjson_obj_get(root, "instructions");
     req.instructions          = yyjson_is_str(instructions) ? yyjson_get_str(instructions) : "";

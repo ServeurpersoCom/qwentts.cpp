@@ -276,7 +276,8 @@ struct qt_tts_params {
     // Input text and language hint. text is required and non empty.
     // lang accepts the upstream qwen3-tts language names ("english",
     // "chinese", "auto", ...). NULL selects "auto": the prompt carries
-    // no language id and the model infers it from the text.
+    // no language id and the model infers it from the text. A name
+    // outside qt_language_name and "auto" is QT_STATUS_INVALID_PARAMS.
     // instruct is the style instruction string; required for
     // voice_design, optional for custom_voice, rejected for base.
     // speaker is the named speaker for custom_voice models, rejected

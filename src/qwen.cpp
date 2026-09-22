@@ -26,6 +26,7 @@
 #include "version.h"
 
 #include <atomic>
+#include <cctype>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
@@ -585,6 +586,24 @@ enum qt_status qt_extract_voice_ref(struct qt_context *   q,
     return job.status;
 }
 
+// A language the synthesis speaks: auto, or a name of the codec table in
+// any case, as the prompt builder looks it up.
+static bool qt_language_known(const struct qt_context * q, const char * lang) {
+    std::string name = lang;
+    for (char & c : name) {
+        c = (char) std::tolower((unsigned char) c);
+    }
+    if (name == "auto") {
+        return true;
+    }
+    for (const LanguageEntry & e : q->pt.languages) {
+        if (e.name == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
 enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params * params, struct qt_audio * out) {
     if (!q || !params) {
         qt_set_error("qt_synthesize: q or params is NULL");
@@ -611,6 +630,13 @@ enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params *
 
     if (!params->text || !params->text[0]) {
         qt_set_error("qt_synthesize: params->text is NULL or empty");
+        if (out) {
+            qt_audio_free(out);
+        }
+        return QT_STATUS_INVALID_PARAMS;
+    }
+    if (params->lang && !qt_language_known(q, params->lang)) {
+        qt_set_error("qt_synthesize: unknown language '%s'", params->lang);
         if (out) {
             qt_audio_free(out);
         }

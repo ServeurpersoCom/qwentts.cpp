@@ -132,7 +132,8 @@ OpenAI-compatible server (`tts-server`) : `response_format` "pcm"
 streams s16le as it is generated, "wav" returns a one-shot file. Cloned
 voices register once over HTTP (a WAV extracted server side, or the
 `.spk` / `.rvq` latents from `qwen-codec`), then any OAI client selects
-them by name :
+them by name. `language` overrides the server default for a single
+request :
 
 ```
 ./build/tts-server \
@@ -145,8 +146,8 @@ curl -X POST localhost:8080/v1/audio/voices -H "Content-Type: application/json" 
          \"spk_b64\":\"$(base64 -w0 ref.spk)\",\"rvq_b64\":\"$(base64 -w0 ref.rvq)\"}"
 
 curl -X POST localhost:8080/v1/audio/speech -H "Content-Type: application/json" \
-    -d '{"input":"Hello world.","voice":"freeman","response_format":"wav",
-         "seed":42,"temperature":0.8}' -o out.wav
+    -d '{"input":"Hello world.","voice":"freeman","language":"English",
+         "response_format":"wav","seed":42,"temperature":0.8}' -o out.wav
 ```
 
 The speech body accepts optional sampling overrides (`seed`,

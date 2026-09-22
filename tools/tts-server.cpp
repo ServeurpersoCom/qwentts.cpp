@@ -49,7 +49,7 @@ static void print_usage(const char * prog) {
             "  --alias <name>          Report this model id instead of the GGUF file name\n"
             "  --host <ip>             Listen address (default: 127.0.0.1)\n"
             "  --port <n>              Listen port (default: 8080)\n"
-            "  --lang <name>           Language label (default: auto)\n"
+            "  --lang <name>           Language label when a request omits one (default: auto)\n"
             "  --max-batch <n>         Concurrent requests batched on the GPU (default: 1)\n"
             "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
@@ -227,7 +227,7 @@ int main(int argc, char ** argv) {
         struct qt_tts_params p;
         qt_tts_default_params(&p);
         p.text = req.input.c_str();
-        p.lang = lang.c_str();
+        p.lang = req.lang.empty() ? lang.c_str() : req.lang.c_str();
 
         // Copy the registered voice latents out under the lock: the
         // synthesis may run for seconds while another connection
