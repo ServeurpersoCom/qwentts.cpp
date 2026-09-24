@@ -61,9 +61,7 @@ which the image does not provide.
 | `PORT`             | `8080`                                       |
 | `MODEL_ALIAS`      | unset (reports the GGUF file name)           |
 | `CODEC_CHUNK_DUR`  | unset (server default: `24.0`)               |
-| `CODEC_LEFT_DUR`   | unset (server default: `2.0`)                 |
 | `MAX_BATCH`        | unset (server default: `1`)                  |
-| `MAX_PREFILL_TOKENS` | unset (server default: `0`, disabled)      |
 | `NO_FA`            | unset; set to `1` to disable flash attention  |
 | `CLAMP_FP16`       | unset; set to `1` to clamp hidden states      |
 | `WARMUP_VOICE`     | unset; set to a registered voice name to enable the startup warmup below |
@@ -86,8 +84,7 @@ up the first time a long prompt or a long reply arrives on live
 traffic. Setting `WARMUP_VOICE` runs one real synthesis at container
 startup, capped at `WARMUP_MAX_NEW_TOKENS` frames, to force that
 worst-case buffer growth to happen up front instead of on a live
-request. Combine with `--max-prefill-tokens` (`MAX_PREFILL_TOKENS`
-above) for the input side of the same problem. If the warmup
+request. If the warmup
 synthesis fails (most likely out of VRAM), the container exits
 non-zero rather than come up healthy and fail unpredictably later --
 by design, since a deployment that can't afford its own configured

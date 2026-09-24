@@ -22,6 +22,11 @@
 #       --build-arg CUDA_BUILD_IMAGE=nvidia/cuda:13.3.1-devel-ubuntu22.04 \
 #       --build-arg CUDA_RUNTIME_IMAGE=nvidia/cuda:13.3.1-runtime-ubuntu22.04 .
 
+# Every stage builds ggml-cpu once per x86 ISA level as loadable backends:
+# ggml_backend_load_all() scores them against the host CPUID at startup and
+# loads the best match, so the images run on any x86_64 CPU at its native
+# ISA instead of the build runner's.
+
 ARG CUDA_BUILD_IMAGE=nvidia/cuda:12.9.2-devel-ubuntu22.04
 ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.9.2-runtime-ubuntu22.04
 
@@ -32,7 +37,9 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     > /dev/null && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY . .
-RUN cmake -B build -DGGML_BLAS=ON -DCMAKE_BUILD_TYPE=Release && \
+RUN cmake -B build -DGGML_BLAS=ON \
+        -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
+        -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build --config Release -j"$(nproc)"
 
 FROM ubuntu:22.04 AS cpu
@@ -67,6 +74,7 @@ COPY . .
 #    lib64/stubs/libcuda.so for exactly this case; it isn't on the default
 #    linker search path so both -L and -lcuda are needed explicitly.
 RUN cmake -B build -DGGML_CUDA=ON \
+        -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
         -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
         ${CMAKE_CUDA_ARCHITECTURES:+-DCMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}} \
         -DCMAKE_EXE_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -lcuda" \
@@ -99,7 +107,9 @@ RUN wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | gpg --dea
     > /dev/null && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY . .
-RUN cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release && \
+RUN cmake -B build -DGGML_VULKAN=ON \
+        -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
+        -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build --config Release -j"$(nproc)"
 
 FROM ubuntu:22.04 AS vulkan

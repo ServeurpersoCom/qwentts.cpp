@@ -15,9 +15,7 @@ ALIAS=${MODEL_ALIAS:-}
 extra_args=()
 [ -n "$ALIAS" ] && extra_args+=(--alias "$ALIAS")
 [ -n "$CODEC_CHUNK_DUR" ] && extra_args+=(--codec-chunk-dur "$CODEC_CHUNK_DUR")
-[ -n "$CODEC_LEFT_DUR" ] && extra_args+=(--codec-left-dur "$CODEC_LEFT_DUR")
 [ -n "$MAX_BATCH" ] && extra_args+=(--max-batch "$MAX_BATCH")
-[ -n "$MAX_PREFILL_TOKENS" ] && extra_args+=(--max-prefill-tokens "$MAX_PREFILL_TOKENS")
 [ "$NO_FA" = "1" ] && extra_args+=(--no-fa)
 [ "$CLAMP_FP16" = "1" ] && extra_args+=(--clamp-fp16)
 
@@ -69,8 +67,7 @@ done
 # Optional fatal worst-case warmup: exercises one real end-to-end synthesis
 # capped at WARMUP_MAX_NEW_TOKENS frames, so the decode and codec-decode
 # compute buffers (the part that scales with output AUDIO length) get
-# reserved up front -- complementing --max-prefill-tokens above, which
-# only reserves for input TEXT length. Off by default: only runs when
+# reserved up front. Off by default: only runs when
 # WARMUP_VOICE names an already-registered voice. Failure is fatal (kills
 # the server and exits non-zero) by design: a deployment that can't
 # afford its own configured worst case should refuse to come up healthy,
