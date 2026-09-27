@@ -4,7 +4,7 @@
 
 set -eu
 
-REPO="Serveurperso/qwentts.cpp-GGUF"
+REPO="Serveurperso/Qwen3-TTS-GGUF"
 DIR="models"
 mkdir -p "$DIR"
 
@@ -19,4 +19,4 @@ dl() {
 }
 
 dl "qwen-tokenizer-12hz-F32.gguf"
-dl "qwen-base-0.6b-Q8_0.gguf"
+dl "qwen-talker-0.6b-base-Q8_0.gguf"
