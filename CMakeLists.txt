@@ -212,3 +212,26 @@ target_include_directories(test-abi-c PRIVATE
 )
 target_link_libraries(test-abi-c PRIVATE qwen-core)
 link_ggml_backends(test-abi-c)
+
+# 无模型的后端探测必须保留纯 C99 消费能力。
+add_executable(test-backend-abi tests/backend-abi.c)
+set_target_properties(test-backend-abi PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+if(MSVC)
+    target_compile_options(test-backend-abi PRIVATE /W4 /WX)
+else()
+    target_compile_options(test-backend-abi PRIVATE -Wall -Werror -pedantic)
+endif()
+target_link_libraries(test-backend-abi PRIVATE qwen-core)
+link_ggml_backends(test-backend-abi)
+enable_testing()
+add_test(NAME abi-c COMMAND test-abi-c)
+add_test(NAME backend-abi COMMAND test-backend-abi)
+
+# 真实模型的有界性能验证由调用者显式传入材料，不加入默认 CTest。
+add_executable(voice-benchmark EXCLUDE_FROM_ALL tests/voice-benchmark.cpp)
+if(QWEN_SHARED)
+    target_link_libraries(voice-benchmark PRIVATE qwen)
+else()
+    target_link_libraries(voice-benchmark PRIVATE qwen-core)
+endif()
+target_include_directories(voice-benchmark PRIVATE src)

@@ -22,6 +22,7 @@ struct BackendPair {
     ggml_backend_t backend;
     ggml_backend_t cpu_backend;
     bool           has_gpu;
+    int            n_threads;
 };
 
 // Physical core count heuristic (logical / 2 for HT/SMT).
@@ -56,9 +57,13 @@ static ggml_backend_t cpu_backend_new(int n_threads) {
             (ggml_backend_set_n_threads_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
         if (set_fn) {
             set_fn(cpu, n_threads);
+            return cpu;
         }
     }
-    return cpu;
+    // 无法配置线程数时显式拒绝，不能在查询中把请求值冒充实际值。
+    ggml_backend_free(cpu);
+    qt_log(QT_LOG_ERROR, "[Load] CPU backend has no thread configuration entry");
+    return NULL;
 }
 
 // Initialize backends: load all available (CUDA, Metal, Vulkan...),
@@ -101,7 +106,7 @@ static void qt_ggml_log(enum ggml_log_level level, const char * text, void * use
     }
 }
 
-static BackendPair backend_init(const char * label) {
+static void backend_load_all(void) {
     // Magic static: log callback install and dynamic backend loading
     // happen exactly once, safe under concurrent qt_init calls.
     static const bool loaded = [] {
@@ -110,12 +115,16 @@ static BackendPair backend_init(const char * label) {
         return true;
     }();
     (void) loaded;
+}
+
+static BackendPair backend_init(const char * label, int requested_threads = 0, const char * requested_device = nullptr) {
+    backend_load_all();
 
     BackendPair bp = {};
 
     // GGML_BACKEND env var: force a specific device instead of auto-best.
     // Device names: CUDA0, Vulkan0, CPU, BLAS (see ggml_backend_dev_name).
-    const char * force_backend = std::getenv("GGML_BACKEND");
+    const char * force_backend = requested_device ? requested_device : std::getenv("GGML_BACKEND");
     if (force_backend) {
         bp.backend = ggml_backend_init_by_name(force_backend, nullptr);
         if (!bp.backend) {
@@ -123,7 +132,7 @@ static BackendPair backend_init(const char * label) {
             // self-contained line instead of three. The available list can
             // grow with each backend that registers, so a std::string here
             // keeps the formatting allocation-free for the common case.
-            std::string msg = "[Load] GGML_BACKEND=";
+            std::string msg = "[Load] requested device=";
             msg += force_backend;
             msg += " not found. Available:";
             for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
@@ -140,8 +149,10 @@ static BackendPair backend_init(const char * label) {
         qt_log(QT_LOG_ERROR, "[Load] no backend available");
         return BackendPair{};
     }
-    bool best_is_cpu = (strcmp(ggml_backend_name(bp.backend), "CPU") == 0);
-    int  n_threads   = backend_cpu_n_threads();
+    ggml_backend_dev_t selected_device = ggml_backend_get_device(bp.backend);
+    const auto device_type = ggml_backend_dev_type(selected_device);
+    bool best_is_cpu = device_type == GGML_BACKEND_DEVICE_TYPE_CPU;
+    int n_threads = requested_threads > 0 ? requested_threads : backend_cpu_n_threads();
     if (best_is_cpu) {
         ggml_backend_free(bp.backend);
         bp.backend     = cpu_backend_new(n_threads);
@@ -156,7 +167,9 @@ static BackendPair backend_init(const char * label) {
         }
         return BackendPair{};
     }
-    bp.has_gpu = !best_is_cpu;
+    bp.has_gpu = device_type == GGML_BACKEND_DEVICE_TYPE_GPU || device_type == GGML_BACKEND_DEVICE_TYPE_IGPU ||
+                 device_type == GGML_BACKEND_DEVICE_TYPE_META;
+    bp.n_threads = n_threads;
     qt_log(QT_LOG_INFO, "[Load] %s backend: %s (CPU threads: %d)", label, ggml_backend_name(bp.backend), n_threads);
     return bp;
 }

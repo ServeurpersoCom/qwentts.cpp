@@ -59,13 +59,10 @@ extern "C" {
 // git short hash + commit date string returned by qt_version(); for
 // binding compat checks, QT_ABI_VERSION is the only number that
 // matters.
-#define QT_ABI_VERSION 5
+#define QT_ABI_VERSION 6
 
-// Oldest struct layout this build addresses. A v4 or older
-// qt_tts_params places its trailing fields at offsets this build does
-// not map, so such a struct is unreadable here and its caller rebuilds
-// against this header.
-#define QT_ABI_MIN_VERSION 5
+// v6 增加初始化参数尾部字段；旧调用者须使用同一版本头文件重新编译。
+#define QT_ABI_MIN_VERSION 6
 
 // Returns a static string of the form "<git-hash> (<date>)" identifying
 // the exact commit this binary was built from. Safe to call from any
@@ -157,11 +154,20 @@ struct qt_init_params {
     // frames at 12.5 Hz). The streaming path frames its own chunks
     // through the persistent codec stream state and reads none of this.
     float codec_chunk_sec;
+
+    // CPU 计算线程数，包括 GPU 后端的 CPU 回退。0 使用物理核数启发值，负数非法。
+    int n_threads;
+
+    // 严格指定 GGML 设备名（如 CPU、MTL0、Vulkan0、CUDA0），缺席或初始化失败即失败。
+    // NULL 自动选择；保留上游 GGML_BACKEND 环境变量语义。空字符串非法。
+    // 这是设备名而非后端注册表名；使用 qt_backend_device_info 获取可选值。
+    const char * backend;
 };
 
 // Initialise to the standard defaults: both paths NULL (caller must set
 // them before calling qt_init), use_fa true, clamp_fp16 false,
 // max_batch 1, codec_chunk_sec 24.0.
+// 新增字段默认 n_threads=0、backend=NULL。
 QT_API void qt_init_default_params(struct qt_init_params * p);
 
 // Allocate every module described by params. Returns NULL on any
@@ -169,6 +175,40 @@ QT_API void qt_init_default_params(struct qt_init_params * p);
 // returned handle owns its GGML backend pair and must be released with
 // qt_free.
 QT_API struct qt_context * qt_init(const struct qt_init_params * params);
+
+// 独立于 GGML 内部枚举的设备类型，集成显卡也明确报告为 GPU 类型。
+enum qt_backend_device_type {
+    QT_BACKEND_DEVICE_CPU = 0,
+    QT_BACKEND_DEVICE_GPU = 1,
+    QT_BACKEND_DEVICE_IGPU = 2,
+    QT_BACKEND_DEVICE_ACCELERATOR = 3,
+    QT_BACKEND_DEVICE_META = 4,
+};
+
+struct qt_backend_info {
+    const char * backend_name;
+    const char * device_name;
+    const char * device_description;
+    enum qt_backend_device_type device_type;
+    uint64_t free_memory;
+    uint64_t total_memory;
+    int n_threads;
+};
+
+// 不加载模型即可枚举设备。内存量单位为字节，GGML 不报告时为 0。
+// 枚举结果的 backend_name 是注册表名，n_threads 为 0（尚未配置计算后端）。
+// 字符串由注册表持有，调用者不释放；有效期覆盖进程生命周期。
+QT_API int qt_backend_device_count(void);
+QT_API enum qt_status qt_backend_device_info(int index, struct qt_backend_info * out);
+
+// 不加载模型地真实初始化并释放后端。设备/线程数规则与 qt_init 一致。
+// backend_name 使用注册表名；所有字符串在返回后仍有效，n_threads 是已设置值。
+// 探测成功仅证明后端初始化，不能代替真实模型的激活小样本。
+QT_API enum qt_status qt_backend_probe(const char * device, int n_threads, struct qt_backend_info * out);
+
+// 查询已初始化上下文：backend_name 是实际设备对应的后端注册表名，n_threads 是已设置的 CPU 线程数。
+// 字符串有效期覆盖上下文生命周期；out 不持有需要释放的资源。
+QT_API enum qt_status qt_backend_info(const struct qt_context * q, struct qt_backend_info * out);
 
 // Release every module owned by the handle and free the handle itself.
 // Safe on NULL.
