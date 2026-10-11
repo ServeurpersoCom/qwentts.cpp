@@ -561,9 +561,10 @@ def load_bpe_vocab(checkpoint_dir: Path):
             tokens[i] = f"<|unused-{i}|>"
             token_types[i] = 5  # 5 = unused
 
-    # merges.txt : first line may be a "#version" comment, skip it.
-    merges_lines = (checkpoint_dir / "merges.txt").read_text().splitlines()
-    merges = [ln for ln in merges_lines if ln and not ln.startswith("#")]
+    # merges.txt : first line may be a "#version" comment, skip it. Only that
+    # line: real merges start with "#" too ("# #", "## #", ...), 96 in Qwen2.
+    merges_lines = (checkpoint_dir / "merges.txt").read_text(encoding="utf-8").splitlines()
+    merges = [ln for ln in merges_lines if ln and not ln.startswith("#version")]
 
     return tokens, token_types, merges
 
