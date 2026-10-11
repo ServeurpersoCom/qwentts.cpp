@@ -237,6 +237,67 @@ void qt_init_default_params(struct qt_init_params * p) {
     p->max_batch   = 1;
 
     p->codec_chunk_sec = QT_CODEC_CHUNK_SEC_DEFAULT;
+    p->n_threads = 0;
+    p->backend = nullptr;
+}
+
+// 查询复用 GGML 注册表事实，不引入另一份硬件探测逻辑。
+static void qt_fill_backend_info(ggml_backend_dev_t device, struct qt_backend_info * out) {
+    *out = {};
+    out->backend_name = ggml_backend_reg_name(ggml_backend_dev_backend_reg(device));
+    out->device_name = ggml_backend_dev_name(device);
+    out->device_description = ggml_backend_dev_description(device);
+    switch (ggml_backend_dev_type(device)) {
+        case GGML_BACKEND_DEVICE_TYPE_CPU: out->device_type = QT_BACKEND_DEVICE_CPU; break;
+        case GGML_BACKEND_DEVICE_TYPE_GPU: out->device_type = QT_BACKEND_DEVICE_GPU; break;
+        case GGML_BACKEND_DEVICE_TYPE_IGPU: out->device_type = QT_BACKEND_DEVICE_IGPU; break;
+        case GGML_BACKEND_DEVICE_TYPE_ACCEL: out->device_type = QT_BACKEND_DEVICE_ACCELERATOR; break;
+        case GGML_BACKEND_DEVICE_TYPE_META: out->device_type = QT_BACKEND_DEVICE_META; break;
+    }
+    size_t free_memory = 0, total_memory = 0;
+    ggml_backend_dev_memory(device, &free_memory, &total_memory);
+    out->free_memory = (uint64_t) free_memory;
+    out->total_memory = (uint64_t) total_memory;
+}
+
+int qt_backend_device_count(void) {
+    backend_load_all();
+    return (int) ggml_backend_dev_count();
+}
+
+enum qt_status qt_backend_device_info(int index, struct qt_backend_info * out) {
+    if (!out || index < 0 || index >= qt_backend_device_count()) {
+        qt_set_error("qt_backend_device_info: invalid index or NULL out");
+        return QT_STATUS_INVALID_PARAMS;
+    }
+    qt_fill_backend_info(ggml_backend_dev_get((size_t) index), out);
+    return QT_STATUS_OK;
+}
+
+enum qt_status qt_backend_probe(const char * device, int n_threads, struct qt_backend_info * out) {
+    if (!out || n_threads < 0 || (device && !device[0])) {
+        qt_set_error("qt_backend_probe: invalid device, n_threads or NULL out");
+        return QT_STATUS_INVALID_PARAMS;
+    }
+    const auto pair = backend_init("Probe", n_threads, device);
+    if (!pair.backend) {
+        qt_set_error("qt_backend_probe: device '%s' initialization failed", device ? device : "auto");
+        return QT_STATUS_INVALID_PARAMS;
+    }
+    qt_fill_backend_info(ggml_backend_get_device(pair.backend), out);
+    out->n_threads = pair.n_threads;
+    backend_release(pair.backend, pair.cpu_backend);
+    return QT_STATUS_OK;
+}
+
+enum qt_status qt_backend_info(const struct qt_context * q, struct qt_backend_info * out) {
+    if (!q || !out) {
+        qt_set_error("qt_backend_info: q or out is NULL");
+        return QT_STATUS_INVALID_PARAMS;
+    }
+    qt_fill_backend_info(ggml_backend_get_device(q->bp.backend), out);
+    out->n_threads = q->bp.n_threads;
+    return QT_STATUS_OK;
 }
 
 void qt_tts_default_params(struct qt_tts_params * p) {
@@ -438,6 +499,10 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
                params->abi_version, QT_ABI_MIN_VERSION, QT_ABI_VERSION);
         return nullptr;
     }
+    if (params->n_threads < 0 || (params->backend && !params->backend[0])) {
+        qt_set_error("qt_init: n_threads must be nonnegative and backend must not be empty");
+        return nullptr;
+    }
 
     qt_log(QT_LOG_INFO, "[Qwen] qwentts.cpp %s", qt_version());
 
@@ -458,9 +523,9 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
     // qt_free, which is idempotent on partial state (NULL-safe sched,
     // NULL GGUF handles, refcount-correct backend release).
     try {
-        q->bp = backend_init("Talker");
+        q->bp = backend_init("Talker", params->n_threads, params->backend);
         if (!q->bp.backend) {
-            qt_throw("qt_init: backend_init failed (no GGML backend available)");
+            qt_throw("qt_init: backend '%s' initialization failed", params->backend ? params->backend : "auto");
         }
 
         if (!pipeline_tts_load(&q->pt, params->talker_path, params->codec_path, q->bp, params->use_fa,
