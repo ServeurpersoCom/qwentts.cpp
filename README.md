@@ -34,6 +34,7 @@ git clone --recurse-submodules https://github.com/ServeurpersoCom/qwentts.cpp.gi
 cd qwentts.cpp
 ./buildcuda.sh                   # NVIDIA GPU
 ./buildvulkan.sh                 # AMD/Intel GPU (Vulkan)
+./buildmetal.sh                  # Apple GPU (Metal + BLAS), shared lib too
 ./buildcpu.sh                    # CPU only
 ./buildall.sh                    # all backends, runtime DL loading
 NVCC_CCBIN=g++-13 ./buildcuda.sh # rolling release distros (Arch w/ GCC 16, etc.)
@@ -202,6 +203,8 @@ configure with `cmake -DQWEN_SHARED=ON ...`. The shared target exports
 only the `qt_*` symbols ; every internal `pipeline_*` and `backend_*`
 stays hidden inside the .so. The static `libqwen-core.a` is the default
 build artefact and the one the bundled CLI tools link against.
+
+`./buildmetal.sh` passes the flag ; the other build scripts do not.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the model, the
 GGUF layout, the inference pipeline, every CLI flag, the public API

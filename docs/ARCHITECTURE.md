@@ -45,6 +45,7 @@ git clone --recurse-submodules https://github.com/ServeurpersoCom/qwentts.cpp.gi
 cd qwentts.cpp
 ./buildcuda.sh      # NVIDIA GPU
 ./buildvulkan.sh    # AMD/Intel GPU (Vulkan)
+./buildmetal.sh     # Apple GPU (Metal + BLAS), shared lib too
 ./buildcpu.sh       # CPU only
 ./buildall.sh       # all backends, runtime DL loading
 ```
@@ -530,7 +531,8 @@ The static `libqwen-core.a` is the default artefact and the one the CLI
 tools link. For binding consumers, configure with `-DQWEN_SHARED=ON` to
 add `libqwen.so` (or `.dll` / `.dylib`) exporting only the `qt_*`
 symbols ; every internal `pipeline_*` and `backend_*` stays hidden
-behind `-fvisibility=hidden`.
+behind `-fvisibility=hidden`. `./buildmetal.sh` is the one build script
+that configures the option in.
 
 ## CLI tools
 
