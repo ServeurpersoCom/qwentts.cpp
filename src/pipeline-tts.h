@@ -218,6 +218,8 @@ int pipeline_tts_duration_sec_to_tokens(const PipelineTTS * pt, float duration_s
 struct TtsJob {
     const struct qt_tts_params * params;
     int64_t                      resolved_seed;
+    qt_text_input_cb             next_text = nullptr;
+    void *                       text_user_data = nullptr;
     struct qt_audio *            out;
     qt_status                    status;
     std::string                  error;

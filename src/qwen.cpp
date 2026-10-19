@@ -607,7 +607,8 @@ static bool qt_language_known(const struct qt_context * q, const char * lang) {
     return false;
 }
 
-enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params * params, struct qt_audio * out) {
+static enum qt_status qt_synthesize_impl(struct qt_context * q, const struct qt_tts_params * params,
+                                        struct qt_audio * out, qt_text_input_cb next_text, void * text_user_data) {
     if (!q || !params) {
         qt_set_error("qt_synthesize: q or params is NULL");
         if (out) {
@@ -631,11 +632,16 @@ enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params *
         return QT_STATUS_INVALID_PARAMS;
     }
 
-    if (!params->text || !params->text[0]) {
+    if (!next_text && (!params->text || !params->text[0])) {
         qt_set_error("qt_synthesize: params->text is NULL or empty");
         if (out) {
             qt_audio_free(out);
         }
+        return QT_STATUS_INVALID_PARAMS;
+    }
+    if (next_text &&
+        (!params->on_chunk || q->pt.max_batch != 1 || params->ref_text || params->ref_codes)) {
+        qt_set_error("incremental input requires audio callback, max_batch=1 and no ICL reference");
         return QT_STATUS_INVALID_PARAMS;
     }
     if (params->lang && !qt_language_known(q, params->lang)) {
@@ -721,6 +727,8 @@ enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params *
         // across the thread hop.
         TtsJob job;
         job.params        = params;
+        job.next_text     = next_text;
+        job.text_user_data = text_user_data;
         job.resolved_seed = resolved_seed;
         job.out           = out;
         job.status        = QT_STATUS_OK;
@@ -746,6 +754,20 @@ enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params *
         }
         return QT_STATUS_GENERATE_FAILED;
     }
+}
+
+enum qt_status qt_synthesize(struct qt_context * q, const struct qt_tts_params * params, struct qt_audio * out) {
+    return qt_synthesize_impl(q, params, out, nullptr, nullptr);
+}
+
+enum qt_status qt_synthesize_incremental(struct qt_context * q, const struct qt_tts_params * params,
+                                        qt_text_input_cb next_text, void * text_user_data) {
+    if (!q || !params || !next_text || params->abi_version != QT_ABI_VERSION || !params->on_chunk ||
+        q->pt.max_batch != 1 || params->ref_text || params->ref_codes) {
+        qt_set_error("qt_synthesize_incremental: requires ABI 6, audio/input callbacks, max_batch=1 and no ICL reference");
+        return QT_STATUS_INVALID_PARAMS;
+    }
+    return qt_synthesize_impl(q, params, NULL, next_text, text_user_data);
 }
 
 int qt_duration_sec_to_tokens(const struct qt_context * q, float duration_sec) {

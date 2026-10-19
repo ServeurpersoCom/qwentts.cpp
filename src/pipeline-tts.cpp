@@ -3,6 +3,8 @@
 // and provide a structured load-time summary for --load-only mode.
 
 #include "pipeline-tts.h"
+#include "incremental-text.h"
+#include <deque>
 
 #include "audio-io.h"
 #include "bpe.h"
@@ -512,6 +514,10 @@ struct TtsSlot {
     int64_t              subseq_counter;  // Philox subsequence cursor
     std::vector<int32_t> talker_history;  // emitted c0, feeds repetition penalty
     std::vector<int32_t> prev_ids;        // previous frame codes [num_code_groups]
+    IncrementalText       input;
+    std::deque<int32_t>   input_tokens;
+    std::vector<float>   input_overlay;
+    bool                 text_eos_sent = false;
     const float *        prev_overlay;    // trailing text row or tts_pad row
     std::vector<float>   logits;          // pending c0 logits [vocab]
     int                  pending_c0;      // c0 of the frame in flight
@@ -718,6 +724,35 @@ static bool tts_admit_fail(TtsJob * job, qt_status st) {
     return false;
 }
 
+// Called only on the backend owner. WAIT_TEXT blocks in the producer callback;
+// the caller must wake it on cancellation. No codec or KV state is reset.
+static int incremental_next_id(TtsSlot & s, BPETokenizer * tok, int32_t * id) {
+    const qt_tts_params * p = s.job->params;
+    while (s.input_tokens.empty()) {
+        if (p->cancel && p->cancel(p->cancel_user_data)) return -1;
+        std::string text = s.input.take();
+        if (!text.empty()) {
+            if (!IncrementalText::valid_utf8(text)) { qt_set_error("incremental input: invalid UTF-8"); return -2; }
+            // Treat user input as literal text: disallow special-token injection.
+            if (text.find("<|") != std::string::npos) { qt_set_error("incremental input: reserved token delimiter"); return -2; }
+            auto ids = bpe_encode(tok, text, false);
+            s.input_tokens.insert(s.input_tokens.end(), ids.begin(), ids.end());
+            if (!s.input_tokens.empty()) break;
+        }
+        if (s.input.state == IncrementalText::State::done) return 0;
+        const char * bytes = nullptr;
+        size_t n = 0;
+        int r = s.job->next_text(s.job->text_user_data, &bytes, &n);
+        if (r == -1) { s.input.apply(IncrementalText::Event::cancel); return -1; }
+        if (r == 0) { s.input.apply(IncrementalText::Event::finish); continue; }
+        if (r != 1 || !bytes || !n || n > IncrementalText::limit ||
+            !s.input.apply(IncrementalText::Event::append, std::string(bytes, n))) {
+            qt_set_error("incremental input: invalid chunk or mutable tail exceeds 65536 bytes"); return -2;
+        }
+    }
+    *id = s.input_tokens.front(); s.input_tokens.pop_front(); return 1;
+}
+
 bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
     PipelineTTS *                pt     = e->pt;
     const struct qt_tts_params * params = job->params;
@@ -870,11 +905,29 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
     // language id and the model infers it from the text.
     const char * lang = params->lang ? params->lang : "auto";
 
+    const bool incremental = job->next_text != nullptr;
+    int32_t first_text_id = 0;
+    if (incremental) {
+        int r = incremental_next_id(s, e->tok, &first_text_id);
+        if (r != 1) {
+            e->slots.pop_back();
+            if (r == 0) qt_set_error("incremental input: empty text");
+            return tts_admit_fail(job, r == -1 ? QT_STATUS_CANCELLED : QT_STATUS_INVALID_PARAMS);
+        }
+    }
     Timer t_build;
-    if (!prompt_builder_build(pt, e->tok, params->text, lang, instruct, speaker, ref_spk_emb_ptr, ref_text,
-                              s.ref_codes_ptr, s.ref_codes_T, &s.prompt)) {
+    if (!prompt_builder_build(pt, e->tok, incremental ? "x" : params->text, lang, instruct, speaker, ref_spk_emb_ptr, ref_text,
+                              s.ref_codes_ptr, s.ref_codes_T, &s.prompt, incremental)) {
         e->slots.pop_back();
         return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
+    }
+    if (incremental) {
+        float * last = s.prompt.input_embed.data() + (size_t)(s.prompt.T_ctx - 1) * s.prompt.hidden;
+        if (!project_text_ids_backend(pt, &first_text_id, 1, last)) {
+            e->slots.pop_back(); return tts_admit_fail(job, QT_STATUS_GENERATE_FAILED);
+        }
+        vec_add(last, pt->prompt_cache.codec_bos_emb.data(), s.prompt.hidden);
+        s.input_overlay.resize((size_t)s.prompt.hidden);
     }
     s.perf.build_ms = t_build.ms();
 
@@ -1091,6 +1144,23 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
         std::vector<float>   overlays((size_t) hidden * (size_t) N_dec);
         for (int i = 0; i < N_dec; i++) {
             TtsSlot & s = e->slots[(size_t) i];
+            if (s.job->next_text != nullptr && !s.text_eos_sent) {
+                int32_t text_id;
+                int r = incremental_next_id(s, e->tok, &text_id);
+                if (r < 0) {
+                    s.finished = true;
+                    s.fin_status = r == -1 ? QT_STATUS_CANCELLED : QT_STATUS_INVALID_PARAMS;
+                    s.prev_overlay = s.prompt.tts_pad_embed.data();
+                } else if (r == 0) {
+                    s.text_eos_sent = true;
+                    s.prev_overlay = pt->prompt_cache.tts_eos_emb.data();
+                } else if (!project_text_ids_backend(pt, &text_id, 1, s.input_overlay.data())) {
+                    s.finished = true; s.fin_status = QT_STATUS_GENERATE_FAILED;
+                    s.prev_overlay = s.prompt.tts_pad_embed.data();
+                } else {
+                    s.prev_overlay = s.input_overlay.data();
+                }
+            }
             for (int g = 0; g < num_codebooks; g++) {
                 ids[(size_t) g * (size_t) N_dec + (size_t) i] = s.prev_ids[(size_t) g];
             }
@@ -1155,6 +1225,9 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
         // codec_eos. Then run the upstream sampling chain.
         Timer t_host;
         apply_suppress(s.logits.data(), vocab, vocab - 1024, vocab, codec_eos_id);
+        if (s.job->next_text != nullptr && !s.text_eos_sent) {
+            s.logits[(size_t)codec_eos_id] = -INFINITY;
+        }
         float u_c0 = 0.0f;
         int   c0   = sample_top_k_p(s.logits.data(), vocab, p->temperature, p->top_k, p->top_p, p->repetition_penalty,
                                     s.talker_history.data(), (int) s.talker_history.size(), s.job->resolved_seed,
@@ -1318,6 +1391,10 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
                     }
                     if (s.step >= p->max_new_tokens) {
                         s.finished = true;
+                        if (s.job->next_text != nullptr) {
+                            s.fin_status = QT_STATUS_GENERATE_FAILED;
+                            qt_set_error("incremental input: max_new_tokens reached before model EOS");
+                        }
                     }
                 }
             }
@@ -1372,7 +1449,8 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
                 ok = tts_engine_codec_flush(e);
             } else if (e->codec_pending_n >= e->codec_target) {
                 ok = tts_engine_codec_flush(e);
-                if (ok && e->codec_target < (1 << (CODEC_STREAM_CLASSES - 1))) {
+                if (ok && e->codec_target < (1 << (CODEC_STREAM_CLASSES - 1)) &&
+                    !(e->slots[0].job->next_text != nullptr)) {
                     e->codec_target <<= 1;
                 }
             }

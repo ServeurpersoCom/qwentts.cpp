@@ -13,6 +13,8 @@ runs on CPU, CUDA, Metal, Vulkan.
   in-context with a matching transcript
 - Voice design from a free text attribute instruction (gender, age,
   pitch, style)
+- Incremental text-in/audio-out C API with persistent model state; see
+  [incremental streaming](docs/INCREMENTAL.md) for the callback contract and limits
 - Streaming synthesis : stateful frame-by-frame codec decode, the first
   audio callback fires one frame after the first Talker step and the
   output matches the offline full decode exactly

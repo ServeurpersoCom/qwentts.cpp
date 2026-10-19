@@ -373,7 +373,7 @@ static bool prompt_builder_build(PipelineTTS *         pt,
                                  const std::string &   ref_text,
                                  const int32_t *       ref_codes,
                                  int                   ref_codes_T,
-                                 PromptBuilderOutput * out) {
+                                 PromptBuilderOutput * out, bool incremental = false) {
     const int hidden = pt->talker.hidden_size;
 
     if (!speaker_name.empty() && ref_spk_emb != NULL) {
@@ -574,7 +574,7 @@ static bool prompt_builder_build(PipelineTTS *         pt,
     // Standard layout    : N_instruct + 3 (role) + (n_pad_pre + 1) + N_text + 1 (eos) + 1 (final)
     // ICL layout         : N_instruct + 3 (role) + (n_pad_pre + 1) + icl_T
     const int T_ctx =
-        icl ? (N_instruct + 3 + (n_pad_pre + 1) + icl_T) : (N_instruct + 3 + (n_pad_pre + 1) + N_text + 1 + 1);
+        incremental ? (N_instruct + 3 + (n_pad_pre + 1) + 1) : icl ? (N_instruct + 3 + (n_pad_pre + 1) + icl_T) : (N_instruct + 3 + (n_pad_pre + 1) + N_text + 1 + 1);
     out->T_ctx  = T_ctx;
     out->hidden = hidden;
     out->input_embed.assign((size_t) T_ctx * (size_t) hidden, 0.0f);
@@ -646,7 +646,13 @@ static bool prompt_builder_build(PipelineTTS *         pt,
     // From here, two paths: standard (no ICL) builds the trailing
     // utterance text + tts_eos + final_pad, ICL builds an aligned
     // text/codec block that replaces those rows entirely.
-    if (!icl) {
+    if (incremental) {
+        // Official non_streaming_mode=False geometry: first text token
+        // aligned with codec_bos, then one text token per acoustic frame.
+        project_text_range(pt, ids.data(), 3, 4, row_ptr(row));
+        vec_add(row_ptr(row), codec_bos_emb.data(), hidden);
+        row++;
+    } else if (!icl) {
         // Standard layout: trailing utterance text + tts_eos rows summed
         // with codec_pad, then a final tts_pad + codec_bos row.
         project_text_range(pt, ids.data(), 3, 3 + N_text, row_ptr(row));

@@ -212,3 +212,21 @@ target_include_directories(test-abi-c PRIVATE
 )
 target_link_libraries(test-abi-c PRIVATE qwen-core)
 link_ggml_backends(test-abi-c)
+
+# Pure input reducer traces run without model weights.
+add_executable(test-incremental-text tests/incremental-text.cpp)
+target_include_directories(test-incremental-text PRIVATE src)
+
+add_executable(test-incremental-model tests/incremental-model.cpp)
+target_link_libraries(test-incremental-model PRIVATE qwen-core)
+link_ggml_backends(test-incremental-model)
+
+if(MSVC)
+    target_compile_options(test-incremental-text PRIVATE /UNDEBUG)
+else()
+    target_compile_options(test-incremental-text PRIVATE -UNDEBUG)
+endif()
+
+enable_testing()
+add_test(NAME abi-c COMMAND test-abi-c)
+add_test(NAME incremental-text COMMAND test-incremental-text)
