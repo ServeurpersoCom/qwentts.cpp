@@ -41,6 +41,27 @@ NVCC_CCBIN=g++-13 ./buildcuda.sh # rolling release distros (Arch w/ GCC 16, etc.
 
 `-DGGML_SOURCE_DIR=<path>` swaps the ggml submodule for another tree (upstream ggml, llama.cpp/ggml).
 
+### Windows notes
+
+- `buildcuda.cmd` and `buildvulkan.cmd` find the newest Visual Studio with
+  the C++ toolset through `vswhere` (Community, Professional, Enterprise or
+  Build Tools) and use the CMake and Ninja it ships; nothing else to install
+  besides the CUDA toolkit or the Vulkan SDK.
+- Clone with `--recurse-submodules` (or `git submodule update --init` after a
+  shallow clone): without `ggml/` the configure step stops at
+  `add_subdirectory`.
+- Build from a short path. The Vulkan shader generator is a nested
+  ExternalProject and its intermediate paths exceed `MAX_PATH` (260) under a
+  deep tree such as `AppData\Local\...`; the configure step then fails with
+  `C1083: cannot open source file`.
+- CUDA 13 keeps its runtime DLLs in `<toolkit>\bin\x64` (`cudart64_13.dll`,
+  `cublas64_13.dll`, `cublasLt64_13.dll`); `bin\` alone holds the ARM64 set.
+  Put `bin\x64` on `PATH`, or copy the three beside `tts-server.exe`.
+- On a laptop with an integrated GPU, `Vulkan0` is usually that iGPU and the
+  discrete card is `Vulkan1`. The default (`--device` unset) picks the best
+  device; when naming one, check with `--list-devices` first.
+
+
 Docker images (CPU and CUDA, built and published on every release) are
 also available: see [docs/DOCKER.md](docs/DOCKER.md).
 
