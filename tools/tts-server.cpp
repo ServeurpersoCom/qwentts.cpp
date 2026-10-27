@@ -1,7 +1,9 @@
 // tts-server.cpp: OpenAI-compatible HTTP server backed by the qwentts
 // ABI. Loads a talker + codec once, GPU resident, and serves synthesis over
 // POST /v1/audio/speech. The shared core lives in src/tts-server.h ; this
-// file only wires the qt_* ABI into the generic adapter.
+// file only wires the qt_* ABI into the generic adapter, including the
+// cancel hook that a client disconnect trips and the framed
+// /v1/audio/speech/pcm-stream route.
 
 #include "tts-server.h"
 
@@ -14,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -65,6 +68,18 @@ static std::string basename_of(const char * path) {
     std::string s = path;
     size_t      p = s.find_last_of("/\\");
     return p == std::string::npos ? s : s.substr(p + 1);
+}
+
+// One synthesis at a time at the default batch width. The ABI serializes its
+// compute worker too, but this gate is what guarantees the next request does
+// not start until the previous worker, cancelled or not, has returned from
+// qt_synthesize.
+static std::mutex g_synth_mutex;
+
+// ABI trampoline: the cancel hook is polled at the top of every decode step,
+// so a closed client socket stops generation one frame in.
+static bool qt_cancel_from_abort(void * user_data) {
+    return (*static_cast<const tts_abort *>(user_data))();
 }
 
 int main(int argc, char ** argv) {
@@ -234,11 +249,29 @@ int main(int argc, char ** argv) {
     // the same name and injects the pre-extracted reference latents. A
     // name matching neither is rejected instead of silently generating
     // voiceless.
-    be.synthesize = [q, &lang](const tts_request & req, const tts_sink & sink, std::string & err) -> int {
+    be.synthesize = [q, &lang, max_batch](const tts_request & req, const tts_sink & sink, const tts_abort & abort,
+                                          std::string & err) -> int {
+        // max_batch > 1 exists to batch concurrent requests on the GPU, so a
+        // global gate there would defeat it; the ABI admits FIFO per width.
+        // At width 1 the gate is what keeps the next request off the adapter
+        // until the previous worker, cancelled or not, has returned.
+        std::unique_lock<std::mutex> gate(g_synth_mutex, std::defer_lock);
+        if (max_batch <= 1) {
+            gate.lock();
+        }
+
         struct qt_tts_params p;
         qt_tts_default_params(&p);
         p.text = req.input.c_str();
         p.lang = req.lang.empty() ? lang.c_str() : req.lang.c_str();
+
+        // A closed client socket aborts the decode loop at its next step
+        // instead of after the kernel send buffer drains.
+        if (abort) {
+            const tts_abort * abort_ptr = &abort;
+            p.cancel                    = qt_cancel_from_abort;
+            p.cancel_user_data          = (void *) abort_ptr;
+        }
 
         // Copy the registered voice latents out under the lock: the
         // synthesis may run for seconds while another connection
@@ -326,7 +359,7 @@ int main(int argc, char ** argv) {
         }
         qt_audio_free(&out);
         if (rc != QT_STATUS_OK) {
-            err = qt_last_error();
+            err = rc == QT_STATUS_CANCELLED ? "synthesis cancelled" : qt_last_error();
             return (int) rc;
         }
         return 0;

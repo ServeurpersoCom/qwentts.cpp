@@ -190,6 +190,19 @@ add_executable(tts-server tools/tts-server.cpp)
 target_link_libraries(tts-server PRIVATE qwen-core httplib yyjson)
 link_ggml_backends(tts-server)
 
+# pcm-stream-test : wire contract and cancellation tests for the framed
+# /v1/audio/speech/pcm-stream route. A fake backend stands in for the ABI, so
+# the test loads no model and links no ggml/CUDA code at all. It drives real
+# loopback sockets, so it is POSIX only.
+if(NOT WIN32)
+    add_executable(pcm-stream-test tests/pcm-stream.cpp)
+    target_include_directories(pcm-stream-test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR})
+    # tts-server.h pulls audio-io.h, whose unused static helpers are quiet in
+    # the tools because link_ggml_backends disables that warning.
+    target_compile_options(pcm-stream-test PRIVATE -Wall -Wextra -Wshadow -Wno-unused-function)
+    target_link_libraries(pcm-stream-test PRIVATE httplib yyjson Threads::Threads)
+endif()
+
 # test-abi-c : pure C99 smoke test that locks in the public ABI contract.
 # Compiles qwen.h with a C compiler under -Wall -Werror -pedantic and
 # links against the static lib. The test never loads a model ; failure

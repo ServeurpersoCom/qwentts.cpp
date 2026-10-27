@@ -659,6 +659,16 @@ POST   /v1/audio/speech         OAI text-to-speech; response_format "pcm"
                                 sub-talker. Unset fields keep the engine
                                 defaults, temperature 0 selects greedy
                                 decoding on that stack
+POST   /v1/audio/speech/pcm-stream
+                                framed PCM stream: every emitted block is
+                                [u32 big endian byte length][s16le 24 kHz
+                                mono], and a zero-length frame ends a
+                                successful stream. A failure before the first
+                                frame answers with the JSON error envelope and
+                                its HTTP status; a failure or a cancel after
+                                it closes the chunked body without the
+                                terminating chunk, so a truncated stream is
+                                never read as a normal end
 GET    /v1/models               single loaded model, using --alias when set
 GET    /v1/audio/voices         model speakers plus registered cloned voices
 POST   /v1/audio/voices         register a cloned voice: {name, ref_text,
@@ -669,6 +679,14 @@ POST   /v1/audio/voices         register a cloned voice: {name, ref_text,
 DELETE /v1/audio/voices/{name}  drop a registered voice
 GET    /health                  liveness probe
 ```
+
+Both streaming routes cancel generation when the client goes away: the
+handler copies httplib's `is_connection_closed` probe (a zero-timeout poll
+plus a peeked read) into the request and the adapter polls it from the ABI
+cancel hook, so a disconnect stops the decode loop at its next step instead
+of after the kernel send buffer drains. The next request waits on the
+adapter's synthesis gate until the cancelled worker has returned from
+`qt_synthesize`.
 
 A registered voice wins over a model speaker of the same name and
 injects the reference latents into `qt_tts_params` : `ref_text` present
