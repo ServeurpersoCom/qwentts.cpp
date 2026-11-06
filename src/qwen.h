@@ -59,7 +59,7 @@ extern "C" {
 // git short hash + commit date string returned by qt_version(); for
 // binding compat checks, QT_ABI_VERSION is the only number that
 // matters.
-#define QT_ABI_VERSION 6
+#define QT_ABI_VERSION 7
 
 // Oldest struct layout this build addresses. A v4 or older
 // qt_tts_params places its trailing fields at offsets this build does
@@ -161,6 +161,14 @@ struct qt_init_params {
     // GGML device the handle runs on, by name (CUDA0, Vulkan0, MTL0,
     // CPU...). NULL selects the best available device. Since ABI 6.
     const char * device;
+
+    // PEFT LoRA adapter on the talker's attention and MLP projections
+    // (safetensors, layers.{l}.self_attn.{q,k,v,o}_proj and
+    // layers.{l}.mlp.{gate,up,down}_proj, lora_A / lora_B). Applied at
+    // run time beside the base weights, which stay as loaded. NULL
+    // loads none. lora_scale is the adapter's alpha / r. Since ABI 7.
+    const char * lora_path;
+    float        lora_scale;
 };
 
 // Initialise to the standard defaults: both paths NULL (caller must set

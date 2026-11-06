@@ -85,7 +85,19 @@ static bool talker_is_bisect_layer(int l) {
 // norm, codec_head and bisect dump branches. Sizes both the persistent
 // arena in the pipeline and the graph allocated per forward.
 static int talker_graph_max_nodes(int n_layers) {
-    return 48 * n_layers + 256;
+    return (48 + 7 * 3) * n_layers + 256;
+}
+
+// Projection with its LoRA, when one is loaded: W x + B (A x).
+static struct ggml_tensor * talker_proj(struct ggml_context * ctx,
+                                        struct ggml_tensor *  w,
+                                        const TalkerLora &    lora,
+                                        struct ggml_tensor *  x) {
+    struct ggml_tensor * y = ggml_mul_mat(ctx, w, x);
+    if (!lora.a) {
+        return y;
+    }
+    return ggml_add(ctx, y, ggml_mul_mat(ctx, lora.b, ggml_mul_mat(ctx, lora.a, x)));
 }
 
 // Manual F32 attention chain. Used when use_flash_attn is false: GQA
@@ -145,9 +157,9 @@ static struct ggml_tensor * talker_layer_forward(struct ggml_context * ctx,
     h                      = ggml_mul(ctx, h, layer.input_norm_w);
 
     // Q/K/V projections
-    struct ggml_tensor * q = ggml_mul_mat(ctx, layer.attn.q_proj_w, h);  // [n_q_heads*hd, T]
-    struct ggml_tensor * k = ggml_mul_mat(ctx, layer.attn.k_proj_w, h);  // [n_kv*hd, T]
-    struct ggml_tensor * v = ggml_mul_mat(ctx, layer.attn.v_proj_w, h);  // [n_kv*hd, T]
+    struct ggml_tensor * q = talker_proj(ctx, layer.attn.q_proj_w, layer.attn.q_lora, h);  // [n_q_heads*hd, T]
+    struct ggml_tensor * k = talker_proj(ctx, layer.attn.k_proj_w, layer.attn.k_lora, h);  // [n_kv*hd, T]
+    struct ggml_tensor * v = talker_proj(ctx, layer.attn.v_proj_w, layer.attn.v_lora, h);  // [n_kv*hd, T]
 
     q = ggml_reshape_3d(ctx, q, hd, n_q_heads, T);                       // [hd, n_q_heads, T]
     k = ggml_reshape_3d(ctx, k, hd, n_kv, T);
@@ -228,7 +240,7 @@ static struct ggml_tensor * talker_layer_forward(struct ggml_context * ctx,
     // Flash attention output is [hd, n_q_heads, T], flatten heads for o_proj.
     attn = ggml_reshape_2d(ctx, attn, n_q_heads * hd, T);
 
-    struct ggml_tensor * o = ggml_mul_mat(ctx, layer.attn.o_proj_w, attn);
+    struct ggml_tensor * o = talker_proj(ctx, layer.attn.o_proj_w, layer.attn.o_lora, attn);
 
     x = ggml_add(ctx, x, o);
     if (clamp_fp16) {
@@ -241,10 +253,10 @@ static struct ggml_tensor * talker_layer_forward(struct ggml_context * ctx,
 
     // gate and up mul_mats adjacent to the GLU node: the CUDA backend
     // fuses the three into one kernel (ggml_cuda_should_fuse_mul_mat).
-    struct ggml_tensor * gate = ggml_mul_mat(ctx, layer.mlp.gate_proj_w, h2);
-    struct ggml_tensor * up   = ggml_mul_mat(ctx, layer.mlp.up_proj_w, h2);
+    struct ggml_tensor * gate = talker_proj(ctx, layer.mlp.gate_proj_w, layer.mlp.gate_lora, h2);
+    struct ggml_tensor * up   = talker_proj(ctx, layer.mlp.up_proj_w, layer.mlp.up_lora, h2);
     struct ggml_tensor * gu   = ggml_swiglu_split(ctx, gate, up);
-    struct ggml_tensor * mlp  = ggml_mul_mat(ctx, layer.mlp.down_proj_w, gu);
+    struct ggml_tensor * mlp  = talker_proj(ctx, layer.mlp.down_proj_w, layer.mlp.down_lora, gu);
 
     x = ggml_add(ctx, x, mlp);
     if (clamp_fp16) {
@@ -519,9 +531,9 @@ static struct ggml_tensor * talker_layer_forward_batch(struct ggml_context * ctx
     h                      = ggml_mul(ctx, h, layer.input_norm_w);
 
     // Q/K/V projections, batched over the N columns
-    struct ggml_tensor * q = ggml_mul_mat(ctx, layer.attn.q_proj_w, h);  // [n_q_heads*hd, N]
-    struct ggml_tensor * k = ggml_mul_mat(ctx, layer.attn.k_proj_w, h);  // [n_kv*hd, N]
-    struct ggml_tensor * v = ggml_mul_mat(ctx, layer.attn.v_proj_w, h);  // [n_kv*hd, N]
+    struct ggml_tensor * q = talker_proj(ctx, layer.attn.q_proj_w, layer.attn.q_lora, h);  // [n_q_heads*hd, N]
+    struct ggml_tensor * k = talker_proj(ctx, layer.attn.k_proj_w, layer.attn.k_lora, h);  // [n_kv*hd, N]
+    struct ggml_tensor * v = talker_proj(ctx, layer.attn.v_proj_w, layer.attn.v_lora, h);  // [n_kv*hd, N]
 
     q = ggml_reshape_3d(ctx, q, hd, n_q_heads, N);                       // [hd, n_q_heads, N]
     k = ggml_reshape_3d(ctx, k, hd, n_kv, N);
@@ -589,7 +601,7 @@ static struct ggml_tensor * talker_layer_forward_batch(struct ggml_context * ctx
     // for o_proj.
     attn = ggml_reshape_2d(ctx, attn, n_q_heads * hd, N);
 
-    struct ggml_tensor * o = ggml_mul_mat(ctx, layer.attn.o_proj_w, attn);
+    struct ggml_tensor * o = talker_proj(ctx, layer.attn.o_proj_w, layer.attn.o_lora, attn);
 
     x = ggml_add(ctx, x, o);
     if (clamp_fp16) {
@@ -602,10 +614,10 @@ static struct ggml_tensor * talker_layer_forward_batch(struct ggml_context * ctx
 
     // gate and up mul_mats adjacent to the GLU node: the CUDA backend
     // fuses the three into one kernel (ggml_cuda_should_fuse_mul_mat).
-    struct ggml_tensor * gate = ggml_mul_mat(ctx, layer.mlp.gate_proj_w, h2);
-    struct ggml_tensor * up   = ggml_mul_mat(ctx, layer.mlp.up_proj_w, h2);
+    struct ggml_tensor * gate = talker_proj(ctx, layer.mlp.gate_proj_w, layer.mlp.gate_lora, h2);
+    struct ggml_tensor * up   = talker_proj(ctx, layer.mlp.up_proj_w, layer.mlp.up_lora, h2);
     struct ggml_tensor * gu   = ggml_swiglu_split(ctx, gate, up);
-    struct ggml_tensor * mlp  = ggml_mul_mat(ctx, layer.mlp.down_proj_w, gu);
+    struct ggml_tensor * mlp  = talker_proj(ctx, layer.mlp.down_proj_w, layer.mlp.down_lora, gu);
 
     x = ggml_add(ctx, x, mlp);
     if (clamp_fp16) {

@@ -198,7 +198,9 @@ bool pipeline_tts_load(PipelineTTS * pt,
                        bool          use_fa,
                        bool          clamp_fp16,
                        int           max_batch,
-                       float         codec_chunk_sec);
+                       float         codec_chunk_sec,
+                       const char *  lora_path,
+                       float         lora_scale);
 
 void pipeline_tts_free(PipelineTTS * pt);
 
