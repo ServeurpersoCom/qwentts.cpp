@@ -106,6 +106,33 @@ static void backend_load(void) {
     (void) loaded;
 }
 
+// Print every device GGML sees, one per line, with what a --device choice
+// needs to know: the name to pass, the description, the type, and the memory
+// the device reports. On a laptop the first Vulkan device is often the
+// integrated GPU (uma), so "Vulkan0" is not "the GPU"; this table is how a
+// caller finds the discrete one before loading 2 GB of weights onto the
+// wrong chip.
+static void backend_print_devices(void) {
+    backend_load();
+    size_t n = ggml_backend_dev_count();
+    fprintf(stdout, "%zu device(s):\n", n);
+    for (size_t i = 0; i < n; i++) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        size_t             free_b = 0, total_b = 0;
+        ggml_backend_dev_memory(dev, &free_b, &total_b);
+        const char * type = "other";
+        switch (ggml_backend_dev_type(dev)) {
+            case GGML_BACKEND_DEVICE_TYPE_CPU:   type = "cpu"; break;
+            case GGML_BACKEND_DEVICE_TYPE_GPU:   type = "gpu"; break;
+            case GGML_BACKEND_DEVICE_TYPE_IGPU:  type = "igpu"; break;
+            default: break;
+        }
+        fprintf(stdout, "  %-10s %-5s %6zu / %6zu MiB  %s\n", ggml_backend_dev_name(dev), type,
+                free_b / (1024 * 1024), total_b / (1024 * 1024), ggml_backend_dev_description(dev));
+    }
+    fflush(stdout);
+}
+
 // True when name matches a device (CUDA0, Vulkan0, MTL0, CPU...), the
 // check of a --device argument. Otherwise logs the available devices on
 // one self-contained line and returns false.
