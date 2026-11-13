@@ -12,6 +12,7 @@
 
 #include "gguf.h"
 #include "qt-error.h"
+#include "unicode_ranges.h"
 
 #include <cassert>
 #include <climits>
@@ -106,276 +107,307 @@ static int utf8_codepoint(const char * s, int * advance) {
     return c;
 }
 
-// Unicode category checks (simplified but covers Latin + common scripts)
-static bool is_letter(int cp) {
-    if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z')) {
-        return true;
-    }
-    if (cp < 0x80) {
-        return false;
-    }
-    // Latin Extended: U+00C0-U+00D6, U+00D8-U+00F6, U+00F8-U+01BF + Latin Extended-A/B
-    if (cp >= 0xC0 && cp <= 0x024F && cp != 0xD7 && cp != 0xF7) {
-        return true;
-    }
-    // Common CJK, Cyrillic, Greek, Arabic, etc., treat as letters
-    if (cp >= 0x0370 && cp <= 0x1FFF) {
-        return true;  // Greek, Cyrillic, Armenian, etc.
-    }
-    if (cp >= 0x2C00 && cp <= 0x2DFF) {
-        return true;  // Georgian, etc.
-    }
-    if (cp >= 0x3040 && cp <= 0x9FFF) {
-        return true;  // CJK
-    }
-    if (cp >= 0xAC00 && cp <= 0xD7AF) {
-        return true;  // Korean
-    }
-    if (cp >= 0xF900 && cp <= 0xFAFF) {
-        return true;  // CJK compatibility
-    }
-    if (cp >= 0x10000) {
-        return true;  // SMP, mostly letters/symbols
+// Unicode category checks: \p{L} and \p{N} exactly, from the generated tables.
+// Combining marks (Mn/Mc, e.g. Thai vowel and tone marks, Hebrew niqqud) are
+// neither, so the regex splits around them; treating them as letters gave
+// different chunks than the HF tokenizer and garbled speech.
+static bool in_ranges(int cp, const UnicodeRange * r, int n) {
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (cp < r[mid].lo) {
+            hi = mid - 1;
+        } else if (cp > r[mid].hi) {
+            lo = mid + 1;
+        } else {
+            return true;
+        }
     }
     return false;
 }
 
-static bool is_digit(int cp) {
-    return cp >= '0' && cp <= '9';
+static bool is_letter(int cp) {
+    if (cp < 0x80) {
+        return (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z');
+    }
+    return in_ranges(cp, UNICODE_LETTER_RANGES, (int) (sizeof(UNICODE_LETTER_RANGES) / sizeof(UNICODE_LETTER_RANGES[0])));
 }
 
+// \p{N}: any number, not only ASCII digits (Thai ๑, Devanagari १, ½, ², Ⅻ, ...)
+static bool is_digit(int cp) {
+    if (cp < 0x80) {
+        return cp >= '0' && cp <= '9';
+    }
+    return in_ranges(cp, UNICODE_NUMBER_RANGES, (int) (sizeof(UNICODE_NUMBER_RANGES) / sizeof(UNICODE_NUMBER_RANGES[0])));
+}
+
+// \s: the Unicode White_Space property (what the HF tokenizer's regex uses).
 static bool is_whitespace(int cp) {
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C || cp == 0xA0 ||
-           cp == 0x2000 || cp == 0x2001 || cp == 0x2002 || cp == 0x200B;
+    return (cp >= 0x09 && cp <= 0x0D) || cp == 0x20 || cp == 0x85 || cp == 0xA0 || cp == 0x1680 ||
+           (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F ||
+           cp == 0x3000;
 }
 
 static bool is_newline(int cp) {
     return cp == '\n' || cp == '\r';
 }
 
-// GPT-2 pre-tokenizer regex (manual implementation)
-// Pattern: (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}|
-//          \s?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
-// Splits text into non-overlapping chunks (on original text, not byte-encoded).
-static std::vector<std::string> gpt2_pre_tokenize(const std::string & text) {
-    std::vector<std::string> chunks;
-    const char *             s   = text.c_str();
-    int                      len = (int) text.size();
-    int                      i   = 0;
+static void utf8_append(std::string & out, int cp) {
+    if (cp < 0x80) {
+        out += (char) cp;
+    } else if (cp < 0x800) {
+        out += (char) (0xC0 | (cp >> 6));
+        out += (char) (0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += (char) (0xE0 | (cp >> 12));
+        out += (char) (0x80 | ((cp >> 6) & 0x3F));
+        out += (char) (0x80 | (cp & 0x3F));
+    } else {
+        out += (char) (0xF0 | (cp >> 18));
+        out += (char) (0x80 | ((cp >> 12) & 0x3F));
+        out += (char) (0x80 | ((cp >> 6) & 0x3F));
+        out += (char) (0x80 | (cp & 0x3F));
+    }
+}
 
-    while (i < len) {
+// NFC (UAX #15), the normalizer the HF Qwen2 tokenizer runs before splitting:
+// canonical decomposition, canonical ordering, canonical composition. Without
+// it, text that is equivalent but encoded differently (a precomposed nukta
+// letter, Thai marks typed in another order, decomposed accents) tokenizes
+// differently from what the model was trained on.
+static const int HANGUL_S = 0xAC00, HANGUL_L = 0x1100, HANGUL_V = 0x1161, HANGUL_T = 0x11A7;
+static const int HANGUL_L_COUNT = 19, HANGUL_V_COUNT = 21, HANGUL_T_COUNT = 28;
+static const int HANGUL_N_COUNT = HANGUL_V_COUNT * HANGUL_T_COUNT, HANGUL_S_COUNT = HANGUL_L_COUNT * HANGUL_N_COUNT;
+
+static int unicode_ccc(int cp) {
+    if (cp < 0x300) {
+        return 0;
+    }
+    int lo = 0, hi = (int) (sizeof(UNICODE_COMBINING_CLASSES) / sizeof(UNICODE_COMBINING_CLASSES[0])) - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (cp < UNICODE_COMBINING_CLASSES[mid].lo) {
+            hi = mid - 1;
+        } else if (cp > UNICODE_COMBINING_CLASSES[mid].hi) {
+            lo = mid + 1;
+        } else {
+            return UNICODE_COMBINING_CLASSES[mid].ccc;
+        }
+    }
+    return 0;
+}
+
+static void nfd_append(std::vector<int> & out, int cp) {
+    if (cp >= HANGUL_S && cp < HANGUL_S + HANGUL_S_COUNT) {
+        int s = cp - HANGUL_S;
+        out.push_back(HANGUL_L + s / HANGUL_N_COUNT);
+        out.push_back(HANGUL_V + (s % HANGUL_N_COUNT) / HANGUL_T_COUNT);
+        if (s % HANGUL_T_COUNT) {
+            out.push_back(HANGUL_T + s % HANGUL_T_COUNT);
+        }
+        return;
+    }
+    if (cp >= 0xC0) {
+        int lo = 0, hi = (int) (sizeof(UNICODE_DECOMPOSITIONS) / sizeof(UNICODE_DECOMPOSITIONS[0])) - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            if (cp < UNICODE_DECOMPOSITIONS[mid].cp) {
+                hi = mid - 1;
+            } else if (cp > UNICODE_DECOMPOSITIONS[mid].cp) {
+                lo = mid + 1;
+            } else {
+                const UnicodeDecomposition & d = UNICODE_DECOMPOSITIONS[mid];
+                out.insert(out.end(), UNICODE_DECOMPOSITION_CODES + d.offset,
+                           UNICODE_DECOMPOSITION_CODES + d.offset + d.length);
+                return;
+            }
+        }
+    }
+    out.push_back(cp);
+}
+
+// The primary composite of (a, b), or -1.
+static int nfc_compose_pair(int a, int b) {
+    if (a >= HANGUL_L && a < HANGUL_L + HANGUL_L_COUNT && b >= HANGUL_V && b < HANGUL_V + HANGUL_V_COUNT) {
+        return HANGUL_S + ((a - HANGUL_L) * HANGUL_V_COUNT + (b - HANGUL_V)) * HANGUL_T_COUNT;
+    }
+    if (a >= HANGUL_S && a < HANGUL_S + HANGUL_S_COUNT && (a - HANGUL_S) % HANGUL_T_COUNT == 0 && b > HANGUL_T &&
+        b < HANGUL_T + HANGUL_T_COUNT) {
+        return a + (b - HANGUL_T);
+    }
+    int lo = 0, hi = (int) (sizeof(UNICODE_COMPOSITIONS) / sizeof(UNICODE_COMPOSITIONS[0])) - 1;
+    while (lo <= hi) {
+        int                        mid = (lo + hi) / 2;
+        const UnicodeComposition & c   = UNICODE_COMPOSITIONS[mid];
+        if (a < c.first || (a == c.first && b < c.second)) {
+            hi = mid - 1;
+        } else if (a > c.first || b > c.second) {
+            lo = mid + 1;
+        } else {
+            return c.composite;
+        }
+    }
+    return -1;
+}
+
+static std::string nfc_normalize(const std::string & text) {
+    bool ascii = true;
+    for (unsigned char c : text) {
+        if (c >= 0x80) {
+            ascii = false;
+            break;
+        }
+    }
+    if (ascii) {
+        return text;
+    }
+
+    std::vector<int> cps;
+    const char *     s   = text.c_str();
+    int              len = (int) text.size();
+    for (int i = 0; i < len;) {
         int adv;
         int cp = utf8_codepoint(s + i, &adv);
-
-        // Rule 1: Contractions 's 't 're 've 'm 'll 'd
-        if ((cp == '\'' || cp == 0x2019) && i + adv < len) {
-            const char * rest      = s + i + adv;
-            int          rlen      = len - i - adv;
-            auto         try_match = [&](const char * suffix, int slen) -> bool {
-                if (rlen >= slen) {
-                    // case-insensitive compare
-                    for (int k = 0; k < slen; k++) {
-                        char c1 = rest[k], c2 = suffix[k];
-                        if (c1 >= 'A' && c1 <= 'Z') {
-                            c1 = (char) (c1 + 32);
-                        }
-                        if (c1 != c2) {
-                            return false;
-                        }
-                    }
-                    // next char should NOT be a letter
-                    if (rlen > slen) {
-                        int a2;
-                        int cp2 = utf8_codepoint(rest + slen, &a2);
-                        if (is_letter(cp2)) {
-                            return false;
-                        }
-                    }
-                    chunks.push_back(std::string(s + i, adv + slen));
-                    i += adv + slen;
-                    return true;
-                }
-                return false;
-            };
-            if (try_match("ll", 2)) {
-                continue;
-            }
-            if (try_match("re", 2)) {
-                continue;
-            }
-            if (try_match("ve", 2)) {
-                continue;
-            }
-            if (try_match("s", 1)) {
-                continue;
-            }
-            if (try_match("t", 1)) {
-                continue;
-            }
-            if (try_match("m", 1)) {
-                continue;
-            }
-            if (try_match("d", 1)) {
-                continue;
-            }
+        if (adv == 1 && (unsigned char) s[i] >= 0x80) {
+            return text;  // malformed UTF-8: leave the bytes as they are
         }
+        nfd_append(cps, cp);
+        i += adv;
+    }
 
-        // Rule 2: [^\r\n\p{L}\p{N}]?\p{L}+
-        if (is_letter(cp)) {
-            int start = i;
-            i += adv;
-            while (i < len) {
-                int a2;
-                int cp2 = utf8_codepoint(s + i, &a2);
-                if (!is_letter(cp2)) {
-                    break;
-                }
-                i += a2;
-            }
-            chunks.push_back(std::string(s + start, i - start));
-            continue;
+    // Canonical ordering: stable sort of each run of non-starters by class.
+    for (size_t i = 1; i < cps.size(); i++) {
+        int c = unicode_ccc(cps[i]);
+        for (size_t j = i; c && j > 0 && unicode_ccc(cps[j - 1]) > c; j--) {
+            std::swap(cps[j], cps[j - 1]);
         }
-        if (!is_newline(cp) && !is_letter(cp) && !is_digit(cp) && !is_whitespace(cp)) {
-            // Non-letter/number/space, check if followed by letters
-            int start = i;
-            int after = i + adv;
-            if (after < len) {
-                int a2;
-                int cp2 = utf8_codepoint(s + after, &a2);
-                if (is_letter(cp2)) {
-                    i = after + a2;
-                    while (i < len) {
-                        int a3;
-                        int cp3 = utf8_codepoint(s + i, &a3);
-                        if (!is_letter(cp3)) {
-                            break;
-                        }
-                        i += a3;
-                    }
-                    chunks.push_back(std::string(s + start, i - start));
+    }
+
+    // Canonical composition: join each character to the last starter unless a
+    // character in between blocks it (class 0, or a class >= its own).
+    std::vector<int> out;
+    int              starter  = -1;
+    int              last_ccc = 0;
+    for (int cp : cps) {
+        int c = unicode_ccc(cp);
+        if (starter >= 0) {
+            bool adjacent = (int) out.size() - 1 == starter;
+            if (adjacent || (last_ccc != 0 && last_ccc < c)) {
+                int composite = nfc_compose_pair(out[starter], cp);
+                if (composite >= 0) {
+                    out[starter] = composite;
                     continue;
                 }
             }
         }
-
-        // Rule 3: \p{N}+  (digits, consume consecutively)
-        if (is_digit(cp)) {
-            int start = i;
-            while (i < len && is_digit((unsigned char) s[i])) {
-                i++;
-            }
-            // GPT-2 regex matches single \p{N}, let's match one at a time
-            // to be safe, but in practice consecutive digits usually merge anyway.
-            // The regex is \p{N} (single digit), so split each digit:
-            for (int j = start; j < i; j++) {
-                chunks.push_back(std::string(s + j, 1));
-            }
-            continue;
+        if (c == 0) {
+            starter  = (int) out.size();
+            last_ccc = 0;
+        } else {
+            last_ccc = c;
         }
+        out.push_back(cp);
+    }
 
-        // Rule 5: \s*[\r\n]+  (newlines with optional leading whitespace)
-        if (is_newline(cp)) {
-            int start = i;
-            while (i < len && is_newline((unsigned char) s[i])) {
-                i++;
-            }
-            chunks.push_back(std::string(s + start, i - start));
-            continue;
-        }
+    std::string result;
+    result.reserve(text.size());
+    for (int cp : out) {
+        utf8_append(result, cp);
+    }
+    return result;
+}
 
-        // Rule 6: whitespace handling
-        // Regex order: \s+(?!\S) first (trailing whitespace), then \s+ as fallback
-        // \s+(?!\S) backtracks: consumes whitespace NOT followed by non-whitespace
-        // This peels off leading spaces, leaving the last space to combine with the next word
-        if (is_whitespace(cp)) {
-            int start  = i;
-            // Find end of whitespace run
-            int ws_end = i + adv;
-            while (ws_end < len && is_whitespace((unsigned char) s[ws_end]) && !is_newline((unsigned char) s[ws_end])) {
-                ws_end++;
-            }
-            // Check what follows the whitespace run
-            bool followed_by_non_ws =
-                (ws_end < len && !is_whitespace((unsigned char) s[ws_end]) && !is_newline((unsigned char) s[ws_end]));
-            if (followed_by_non_ws && ws_end - start > 1) {
-                // \s+(?!\S) matches all but the last space
-                // Leave one space for the next iteration to combine with word
-                int trailing = ws_end - 1;
-                chunks.push_back(std::string(s + start, trailing - start));
-                i = trailing;
-                continue;
-            }
-            // Single space followed by word: combine space + word as one chunk
-            i = start + adv;
-            if (i < len) {
-                int a2;
-                int cp2 = utf8_codepoint(s + i, &a2);
-                if (is_letter(cp2)) {
-                    i += a2;
-                    while (i < len) {
-                        int a3;
-                        int cp3 = utf8_codepoint(s + i, &a3);
-                        if (!is_letter(cp3)) {
-                            break;
-                        }
-                        i += a3;
-                    }
-                    chunks.push_back(std::string(s + start, i - start));
-                    continue;
-                }
-                if (is_digit(cp2)) {
-                    chunks.push_back(std::string(s + start, i - start));
-                    continue;
-                }
-                if (!is_whitespace(cp2) && !is_newline(cp2)) {
-                    int pstart = start;
-                    while (i < len) {
-                        int a3;
-                        int cp3 = utf8_codepoint(s + i, &a3);
-                        if (is_whitespace(cp3) || is_letter(cp3) || is_digit(cp3)) {
-                            break;
-                        }
-                        i += a3;
-                    }
-                    while (i < len && is_newline((unsigned char) s[i])) {
-                        i++;
-                    }
-                    chunks.push_back(std::string(s + pstart, i - pstart));
-                    continue;
-                }
-            }
-            // Trailing whitespace (end of string or before newline), consume all
-            i = ws_end;
-            while (i < len) {
-                int a2;
-                int cp2 = utf8_codepoint(s + i, &a2);
-                if (!is_whitespace(cp2)) {
-                    break;
-                }
-                i += a2;
-            }
-            chunks.push_back(std::string(s + start, i - start));
-            continue;
-        }
+// Qwen2 pre-tokenizer regex (the HF tokenizer's Split pattern):
+//   (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}|
+//    ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+// At each position the alternatives are tried in that order and the first
+// match is taken, exactly as the regex engine would. Works on code points, so
+// a chunk never ends inside a multi-byte character.
+static std::vector<std::string> gpt2_pre_tokenize(const std::string & text) {
+    std::vector<int> cps, off;
+    const char *     s   = text.c_str();
+    int              len = (int) text.size();
+    for (int i = 0; i < len;) {
+        int adv;
+        cps.push_back(utf8_codepoint(s + i, &adv));
+        off.push_back(i);
+        i += adv;
+    }
+    off.push_back(len);
+    const int n = (int) cps.size();
 
-        // Rule 4: [^\s\p{L}\p{N}]+[\r\n]*  (punctuation/symbols)
-        {
-            int start = i;
-            i += adv;
-            while (i < len) {
-                int a2;
-                int cp2 = utf8_codepoint(s + i, &a2);
-                if (is_whitespace(cp2) || is_letter(cp2) || is_digit(cp2) || is_newline(cp2)) {
-                    break;
-                }
-                i += a2;
+    auto L  = [&](int k) { return k < n && is_letter(cps[k]); };
+    auto N  = [&](int k) { return k < n && is_digit(cps[k]); };
+    auto S  = [&](int k) { return k < n && is_whitespace(cps[k]); };
+    auto NL = [&](int k) { return k < n && is_newline(cps[k]); };
+    auto P  = [&](int k) { return k < n && !is_whitespace(cps[k]) && !is_letter(cps[k]) && !is_digit(cps[k]); };
+    auto lower = [&](int k) {
+        int c = k < n ? cps[k] : 0;
+        return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+    };
+
+    std::vector<std::string> chunks;
+    int                      k = 0;
+    while (k < n) {
+        int e = -1;
+        // (?i:'s|'t|'re|'ve|'m|'ll|'d)
+        if (cps[k] == '\'') {
+            int a = lower(k + 1), b = lower(k + 2);
+            if ((a == 'r' && b == 'e') || (a == 'v' && b == 'e') || (a == 'l' && b == 'l')) {
+                e = k + 3;
+            } else if (a == 's' || a == 't' || a == 'm' || a == 'd') {
+                e = k + 2;
             }
-            // trailing newlines
-            while (i < len && is_newline((unsigned char) s[i])) {
-                i++;
-            }
-            chunks.push_back(std::string(s + start, i - start));
         }
+        // [^\r\n\p{L}\p{N}]?\p{L}+
+        if (e < 0) {
+            int j = (L(k) || N(k) || NL(k)) ? k : k + 1;
+            if (L(j)) {
+                while (L(j)) {
+                    j++;
+                }
+                e = j;
+            }
+        }
+        // \p{N}
+        if (e < 0 && N(k)) {
+            e = k + 1;
+        }
+        //  ?[^\s\p{L}\p{N}]+[\r\n]*
+        if (e < 0) {
+            int j = cps[k] == ' ' ? k + 1 : k;
+            if (P(j)) {
+                while (P(j)) {
+                    j++;
+                }
+                while (NL(j)) {
+                    j++;
+                }
+                e = j;
+            }
+        }
+        // \s*[\r\n]+  |  \s+(?!\S)  |  \s+
+        if (e < 0 && S(k)) {
+            int j = k, last_nl = -1;
+            while (S(j)) {
+                if (NL(j)) {
+                    last_nl = j;
+                }
+                j++;
+            }
+            if (last_nl >= 0) {
+                e = last_nl + 1;
+            } else if (j < n && j - k > 1) {
+                e = j - 1;  // leave the last space to prefix the next chunk
+            } else {
+                e = j;
+            }
+        }
+        if (e < 0) {
+            e = k + 1;  // unreachable for valid input; never stall
+        }
+        chunks.push_back(text.substr(off[k], off[e] - off[k]));
+        k = e;
     }
     return chunks;
 }
@@ -595,7 +627,7 @@ static std::vector<int> bpe_encode(const BPETokenizer * tok, const std::string &
         if (seg.empty()) {
             return;
         }
-        auto chunks = gpt2_pre_tokenize(seg);
+        auto chunks = gpt2_pre_tokenize(nfc_normalize(seg));
         for (const auto & chunk : chunks) {
             encode_chunk(tok, chunk, ids);
         }
