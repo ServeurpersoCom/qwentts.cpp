@@ -238,6 +238,8 @@ void qt_init_default_params(struct qt_init_params * p) {
 
     p->codec_chunk_sec = QT_CODEC_CHUNK_SEC_DEFAULT;
     p->device          = nullptr;
+    p->lora_path       = nullptr;
+    p->lora_scale      = 1.0f;
 }
 
 void qt_tts_default_params(struct qt_tts_params * p) {
@@ -466,8 +468,11 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
             qt_throw("qt_init: backend_init failed (no GGML backend available)");
         }
 
+        // The adapter fields exist from ABI 7.
+        const char * lora_path  = params->abi_version >= 7 ? params->lora_path : nullptr;
+        const float  lora_scale = params->abi_version >= 7 ? params->lora_scale : 1.0f;
         if (!pipeline_tts_load(&q->pt, params->talker_path, params->codec_path, q->bp, params->use_fa,
-                               params->clamp_fp16, max_batch, chunk_sec)) {
+                               params->clamp_fp16, max_batch, chunk_sec, lora_path, lora_scale)) {
             qt_throw("qt_init: pipeline_tts_load failed for '%s' / '%s'", params->talker_path, params->codec_path);
         }
 

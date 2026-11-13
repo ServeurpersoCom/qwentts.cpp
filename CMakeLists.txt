@@ -83,6 +83,7 @@ add_subdirectory(vendor/cpp-httplib)
 
 # yyjson (MIT, fast JSON parser/writer). Used by tts-server.
 add_library(yyjson STATIC vendor/yyjson/yyjson.c)
+set_target_properties(yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(yyjson PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
 if(MSVC)
     target_compile_options(yyjson PRIVATE /W0)
@@ -145,7 +146,7 @@ add_library(qwen-core STATIC
 )
 target_compile_definitions(qwen-core PUBLIC QWEN_STATIC)
 target_include_directories(qwen-core PUBLIC src)
-target_link_libraries(qwen-core PUBLIC ggml)
+target_link_libraries(qwen-core PUBLIC ggml yyjson)
 link_ggml_backends(qwen-core)
 
 # Public shared library for ABI consumers (Python ctypes, Rust bindgen,
@@ -161,6 +162,7 @@ if(QWEN_SHARED)
         src/pipeline-codec.cpp
     )
     target_compile_definitions(qwen PRIVATE QWEN_BUILD)
+    target_link_libraries(qwen PRIVATE yyjson)
     set_target_properties(qwen PROPERTIES
         C_VISIBILITY_PRESET       hidden
         CXX_VISIBILITY_PRESET     hidden

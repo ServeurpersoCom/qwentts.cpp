@@ -44,6 +44,12 @@
 #include <string>
 #include <vector>
 
+// Rank-r adapter on one projection, both NULL when none is loaded.
+struct TalkerLora {
+    struct ggml_tensor * a;
+    struct ggml_tensor * b;
+};
+
 struct TalkerAttention {
     struct ggml_tensor * q_proj_w;
     struct ggml_tensor * k_proj_w;
@@ -51,12 +57,19 @@ struct TalkerAttention {
     struct ggml_tensor * o_proj_w;
     struct ggml_tensor * q_norm_w;
     struct ggml_tensor * k_norm_w;
+    TalkerLora           q_lora;
+    TalkerLora           k_lora;
+    TalkerLora           v_lora;
+    TalkerLora           o_lora;
 };
 
 struct TalkerMLP {
     struct ggml_tensor * gate_proj_w;
     struct ggml_tensor * up_proj_w;
     struct ggml_tensor * down_proj_w;
+    TalkerLora           gate_lora;
+    TalkerLora           up_lora;
+    TalkerLora           down_lora;
 };
 
 struct TalkerLayer {
@@ -94,9 +107,14 @@ struct TalkerWeights {
 
     struct ggml_context * weight_ctx;
     ggml_backend_buffer_t weight_buf;
+
+    struct ggml_context * lora_ctx;
+    ggml_backend_buffer_t lora_buf;
 };
 
 static bool talker_weights_load(TalkerWeights * tw, const GGUFModel & gf, ggml_backend_t backend) {
+    tw->lora_ctx            = NULL;
+    tw->lora_buf            = NULL;
     tw->hidden_size         = (int) gf_get_u32(gf, "qwen3-tts.talker.embedding_length");
     tw->intermediate_size   = (int) gf_get_u32(gf, "qwen3-tts.talker.feed_forward_length");
     tw->num_hidden_layers   = (int) gf_get_u32(gf, "qwen3-tts.talker.block_count");
@@ -188,6 +206,14 @@ static bool talker_weights_load(TalkerWeights * tw, const GGUFModel & gf, ggml_b
 }
 
 static void talker_weights_free(TalkerWeights * tw) {
+    if (tw->lora_buf) {
+        ggml_backend_buffer_free(tw->lora_buf);
+        tw->lora_buf = NULL;
+    }
+    if (tw->lora_ctx) {
+        ggml_free(tw->lora_ctx);
+        tw->lora_ctx = NULL;
+    }
     if (tw->weight_buf) {
         ggml_backend_buffer_free(tw->weight_buf);
         tw->weight_buf = NULL;

@@ -17,6 +17,7 @@
 #include "sampling.h"
 #include "speaker-encoder-extract.h"
 #include "talker-forward.h"
+#include "talker-lora.h"
 #include "timer.h"
 
 #include <cstdio>
@@ -143,7 +144,9 @@ bool pipeline_tts_load(PipelineTTS * pt,
                        bool          use_fa,
                        bool          clamp_fp16,
                        int           max_batch,
-                       float         codec_chunk_sec) {
+                       float         codec_chunk_sec,
+                       const char *  lora_path,
+                       float         lora_scale) {
     pt->bp                  = bp;
     pt->backend             = bp.backend;
     pt->sched               = NULL;
@@ -188,6 +191,12 @@ bool pipeline_tts_load(PipelineTTS * pt,
     parse_speakers(pt->gguf_talker, pt->speakers);
 
     if (!talker_weights_load(&pt->talker, pt->gguf_talker, pt->backend)) {
+        gf_close(&pt->gguf_talker);
+        return false;
+    }
+
+    if (lora_path && *lora_path && !talker_lora_load(&pt->talker, lora_path, lora_scale, pt->backend)) {
+        talker_weights_free(&pt->talker);
         gf_close(&pt->gguf_talker);
         return false;
     }
