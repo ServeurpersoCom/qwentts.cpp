@@ -118,13 +118,8 @@ static struct ggml_tensor * code_predictor_layer_forward(struct ggml_context *  
     struct ggml_tensor * h = ggml_rms_norm(ctx, x, eps);
     h                      = ggml_mul(ctx, h, layer.input_norm_w);
 
-    struct ggml_tensor * q = ggml_mul_mat(ctx, layer.attn.q_proj_w, h);
-    struct ggml_tensor * k = ggml_mul_mat(ctx, layer.attn.k_proj_w, h);
-    struct ggml_tensor * v = ggml_mul_mat(ctx, layer.attn.v_proj_w, h);
-
-    q = ggml_reshape_3d(ctx, q, hd, n_q_heads, TN);
-    k = ggml_reshape_3d(ctx, k, hd, n_kv, TN);
-    v = ggml_reshape_3d(ctx, v, hd, n_kv, TN);
+    struct ggml_tensor *q, *k, *v;
+    talker_qkv(ctx, layer.attn, h, n_q_heads, n_kv, hd, TN, &q, &k, &v);
 
     q = ggml_rms_norm(ctx, q, eps);
     q = ggml_mul(ctx, q, layer.attn.q_norm_w);
@@ -142,10 +137,9 @@ static struct ggml_tensor * code_predictor_layer_forward(struct ggml_context *  
     // [hd, heads, T*N] unflattens to [hd, heads, T, N], permutes to
     // [hd, T, heads, N] and lands at the kv_rows [T, 1, N] destinations,
     // broadcast across the n_kv head dim.
-    struct ggml_tensor * k_perm =
-        ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, k, hd, n_kv, T, N), 0, 2, 1, 3));
+    struct ggml_tensor * k_perm = ggml_permute(ctx, ggml_reshape_4d(ctx, k, hd, n_kv, T, N), 0, 2, 1, 3);
     struct ggml_tensor * v_perm =
-        ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, v, hd, n_kv, T, N), 0, 2, 1, 3));
+        ggml_permute(ctx, ggml_view_4d(ctx, v, hd, n_kv, T, N, v->nb[1], v->nb[2], T * v->nb[2], 0), 0, 2, 1, 3);
 
     struct ggml_tensor * k_sets = ggml_view_4d(ctx, k4, hd, k4->ne[1], n_kv, N, k4->nb[1], k4->nb[2], k4->nb[3], 0);
     struct ggml_tensor * v_sets = ggml_view_4d(ctx, v4, hd, v4->ne[1], n_kv, N, v4->nb[1], v4->nb[2], v4->nb[3], 0);

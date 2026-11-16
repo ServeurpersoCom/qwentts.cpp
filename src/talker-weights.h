@@ -45,6 +45,7 @@
 #include <vector>
 
 struct TalkerAttention {
+    struct ggml_tensor * qkv_w;  // fused [H, q + k + v], NULL when the three types differ
     struct ggml_tensor * q_proj_w;
     struct ggml_tensor * k_proj_w;
     struct ggml_tensor * v_proj_w;
@@ -65,6 +66,46 @@ struct TalkerLayer {
     struct ggml_tensor * post_attn_norm_w;
     TalkerMLP            mlp;
 };
+
+// Load the Q, K and V projections of block l, fused when their types match
+static void talker_load_qkv(WeightCtx * wctx, const GGUFModel & gf, const char * prefix, int l, TalkerAttention & a) {
+    char q[128], k[128], v[128];
+    snprintf(q, sizeof(q), "%s.blk.%d.attn_q.weight", prefix, l);
+    snprintf(k, sizeof(k), "%s.blk.%d.attn_k.weight", prefix, l);
+    snprintf(v, sizeof(v), "%s.blk.%d.attn_v.weight", prefix, l);
+    a.qkv_w = gf_load_qkv_fused(wctx, gf, q, k, v);
+    if (!a.qkv_w) {
+        a.q_proj_w = gf_load_tensor(wctx, gf, q);
+        a.k_proj_w = gf_load_tensor(wctx, gf, k);
+        a.v_proj_w = gf_load_tensor(wctx, gf, v);
+    }
+}
+
+// Q, K and V of h [H, cols] as [hd, heads, cols]. With the fused weight
+// they are views of one projection: one matmul and one activation
+// quantization instead of three.
+static void talker_qkv(struct ggml_context *   ctx,
+                       const TalkerAttention & a,
+                       struct ggml_tensor *    h,
+                       int                     n_q_heads,
+                       int                     n_kv,
+                       int                     hd,
+                       int                     cols,
+                       struct ggml_tensor **   q,
+                       struct ggml_tensor **   k,
+                       struct ggml_tensor **   v) {
+    if (a.qkv_w) {
+        struct ggml_tensor * qkv  = ggml_mul_mat(ctx, a.qkv_w, h);
+        size_t               head = hd * ggml_element_size(qkv);
+        *q                        = ggml_view_3d(ctx, qkv, hd, n_q_heads, cols, head, qkv->nb[1], 0);
+        *k                        = ggml_view_3d(ctx, qkv, hd, n_kv, cols, head, qkv->nb[1], n_q_heads * head);
+        *v                        = ggml_view_3d(ctx, qkv, hd, n_kv, cols, head, qkv->nb[1], (n_q_heads + n_kv) * head);
+        return;
+    }
+    *q = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, a.q_proj_w, h), hd, n_q_heads, cols);
+    *k = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, a.k_proj_w, h), hd, n_kv, cols);
+    *v = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, a.v_proj_w, h), hd, n_kv, cols);
+}
 
 struct TalkerWeights {
     int   hidden_size;
@@ -149,12 +190,7 @@ static bool talker_weights_load(TalkerWeights * tw, const GGUFModel & gf, ggml_b
         snprintf(name, sizeof(name), "talker.blk.%d.ffn_norm.weight", l);
         layer.post_attn_norm_w = gf_load_tensor(&wctx, gf, name);
 
-        snprintf(name, sizeof(name), "talker.blk.%d.attn_q.weight", l);
-        layer.attn.q_proj_w = gf_load_tensor(&wctx, gf, name);
-        snprintf(name, sizeof(name), "talker.blk.%d.attn_k.weight", l);
-        layer.attn.k_proj_w = gf_load_tensor(&wctx, gf, name);
-        snprintf(name, sizeof(name), "talker.blk.%d.attn_v.weight", l);
-        layer.attn.v_proj_w = gf_load_tensor(&wctx, gf, name);
+        talker_load_qkv(&wctx, gf, "talker", l, layer.attn);
         snprintf(name, sizeof(name), "talker.blk.%d.attn_output.weight", l);
         layer.attn.o_proj_w = gf_load_tensor(&wctx, gf, name);
 

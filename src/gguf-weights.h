@@ -291,6 +291,43 @@ static struct ggml_tensor * gf_load_tensor_f32(WeightCtx * wctx, const GGUFModel
 // choice here and load every conv kernel as F16 regardless of source
 // dtype. F16 source is a direct passthrough, F32 and BF16 widen
 // through a F32 staging buffer.
+// Fuse the Q, K and V projection weights into one [ne0, q + k + v] tensor
+// when their types match. Returns NULL otherwise, the caller loads them apart.
+static struct ggml_tensor * gf_load_qkv_fused(WeightCtx *         wctx,
+                                              const GGUFModel &   gf,
+                                              const std::string & q_name,
+                                              const std::string & k_name,
+                                              const std::string & v_name) {
+    struct ggml_tensor * q_src = ggml_get_tensor(gf.meta, q_name.c_str());
+    struct ggml_tensor * k_src = ggml_get_tensor(gf.meta, k_name.c_str());
+    struct ggml_tensor * v_src = ggml_get_tensor(gf.meta, v_name.c_str());
+    if (!q_src || !k_src || !v_src) {
+        qt_throw("[GGUF] QKV tensor not found: %s / %s / %s", q_name.c_str(), k_name.c_str(), v_name.c_str());
+    }
+    if (q_src->ne[0] != k_src->ne[0] || k_src->ne[0] != v_src->ne[0] || q_src->type != k_src->type ||
+        k_src->type != v_src->type) {
+        return NULL;
+    }
+
+    int64_t              ne[2] = { q_src->ne[0], q_src->ne[1] + k_src->ne[1] + v_src->ne[1] };
+    struct ggml_tensor * fused = ggml_new_tensor(wctx->ctx, q_src->type, 2, ne);
+
+    size_t row_size = ggml_row_size(q_src->type, q_src->ne[0]);
+    size_t q_bytes  = q_src->ne[1] * row_size;
+    size_t k_bytes  = k_src->ne[1] * row_size;
+    size_t v_bytes  = v_src->ne[1] * row_size;
+
+    auto get_data = [&](const std::string & name) -> const void * {
+        int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
+        return gf.mapping + gf.data_offset + gguf_get_tensor_offset(gf.gguf, idx);
+    };
+
+    wctx->pending.push_back({ fused, get_data(q_name), q_bytes, 0 });
+    wctx->pending.push_back({ fused, get_data(k_name), k_bytes, q_bytes });
+    wctx->pending.push_back({ fused, get_data(v_name), v_bytes, q_bytes + k_bytes });
+    return fused;
+}
+
 static struct ggml_tensor * gf_load_conv(WeightCtx * wctx, const GGUFModel & gf, const std::string & name) {
     int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
     if (idx < 0) {

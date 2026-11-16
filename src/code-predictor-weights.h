@@ -129,12 +129,7 @@ static bool code_predictor_weights_load(CodePredictorWeights * cw, const GGUFMod
         snprintf(name, sizeof(name), "code_pred.blk.%d.ffn_norm.weight", l);
         layer.post_attn_norm_w = gf_load_tensor(&wctx, gf, name);
 
-        snprintf(name, sizeof(name), "code_pred.blk.%d.attn_q.weight", l);
-        layer.attn.q_proj_w = gf_load_tensor(&wctx, gf, name);
-        snprintf(name, sizeof(name), "code_pred.blk.%d.attn_k.weight", l);
-        layer.attn.k_proj_w = gf_load_tensor(&wctx, gf, name);
-        snprintf(name, sizeof(name), "code_pred.blk.%d.attn_v.weight", l);
-        layer.attn.v_proj_w = gf_load_tensor(&wctx, gf, name);
+        talker_load_qkv(&wctx, gf, "code_pred", l, layer.attn);
         snprintf(name, sizeof(name), "code_pred.blk.%d.attn_output.weight", l);
         layer.attn.o_proj_w = gf_load_tensor(&wctx, gf, name);
 

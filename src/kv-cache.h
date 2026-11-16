@@ -57,13 +57,16 @@ static struct ggml_tensor * kv_cache_v(const KVCache * kv, int set, int layer) {
 
 // Allocate a fresh KV cache backed by a dedicated buffer on `backend`.
 // Tensors are zero initialised: the padded attention window reads past
-// cur_len and the masked tail must see finite values.
+// cur_len and the masked tail must see finite values. Flash attention
+// reads K and V as F16, a cache of that type spares the conversion of
+// the whole window at every step.
 static bool kv_cache_init(KVCache *      kv,
                           int            n_layers,
                           int            n_kv_heads,
                           int            head_dim,
                           int            max_seq_len,
                           int            n_sets,
+                          ggml_type      type,
                           ggml_backend_t backend) {
     kv->n_layers    = n_layers;
     kv->n_kv_heads  = n_kv_heads;
@@ -89,8 +92,8 @@ static bool kv_cache_init(KVCache *      kv,
     }
 
     for (int l = 0; l < n_layers; l++) {
-        kv->k4[(size_t) l] = ggml_new_tensor_4d(kv->ctx, GGML_TYPE_F32, head_dim, max_seq_len, n_kv_heads, n_sets);
-        kv->v4[(size_t) l] = ggml_new_tensor_4d(kv->ctx, GGML_TYPE_F32, head_dim, max_seq_len, n_kv_heads, n_sets);
+        kv->k4[(size_t) l] = ggml_new_tensor_4d(kv->ctx, type, head_dim, max_seq_len, n_kv_heads, n_sets);
+        kv->v4[(size_t) l] = ggml_new_tensor_4d(kv->ctx, type, head_dim, max_seq_len, n_kv_heads, n_sets);
         char name[64];
         snprintf(name, sizeof(name), "kv_k_l%d", l);
         ggml_set_name(kv->k4[(size_t) l], name);

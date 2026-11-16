@@ -298,7 +298,7 @@ static bool pipeline_codec_stream_ensure(PipelineCodec * pc) {
     }
 
     if (!kv_cache_init(&pc->stream_kv, pc->transformer.num_layers, pc->transformer.num_kv_heads,
-                       pc->transformer.head_dim, CODEC_STREAM_RING, S, pc->backend)) {
+                       pc->transformer.head_dim, CODEC_STREAM_RING, S, GGML_TYPE_F32, pc->backend)) {
         ggml_backend_buffer_free(pc->stream_buf);
         pc->stream_buf = NULL;
         ggml_free(pc->stream_ctx);

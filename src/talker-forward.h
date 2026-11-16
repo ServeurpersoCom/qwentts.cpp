@@ -144,14 +144,9 @@ static struct ggml_tensor * talker_layer_forward(struct ggml_context * ctx,
     struct ggml_tensor * h = ggml_rms_norm(ctx, x, eps);
     h                      = ggml_mul(ctx, h, layer.input_norm_w);
 
-    // Q/K/V projections
-    struct ggml_tensor * q = ggml_mul_mat(ctx, layer.attn.q_proj_w, h);  // [n_q_heads*hd, T]
-    struct ggml_tensor * k = ggml_mul_mat(ctx, layer.attn.k_proj_w, h);  // [n_kv*hd, T]
-    struct ggml_tensor * v = ggml_mul_mat(ctx, layer.attn.v_proj_w, h);  // [n_kv*hd, T]
-
-    q = ggml_reshape_3d(ctx, q, hd, n_q_heads, T);                       // [hd, n_q_heads, T]
-    k = ggml_reshape_3d(ctx, k, hd, n_kv, T);
-    v = ggml_reshape_3d(ctx, v, hd, n_kv, T);
+    // Q/K/V projections, [hd, heads, T]
+    struct ggml_tensor *q, *k, *v;
+    talker_qkv(ctx, layer.attn, h, n_q_heads, n_kv, hd, T, &q, &k, &v);
 
     // Per-head QK-norm: RMS over hd, then multiply by [hd] gain. The
     // norm operates on ne[0] = hd, identical layout for q (16 heads) and
@@ -176,8 +171,8 @@ static struct ggml_tensor * talker_layer_forward(struct ggml_context * ctx,
     // [hd, n_kv, T] at this point and the cache lives as
     // [hd, max_T, n_kv] so we permute to [hd, T, n_kv]; the row ids
     // broadcast across the n_kv head dim.
-    struct ggml_tensor * k_perm = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));  // [hd, T, n_kv]
-    struct ggml_tensor * v_perm = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));  // [hd, T, n_kv]
+    struct ggml_tensor * k_perm = ggml_permute(ctx, k, 0, 2, 1, 3);  // [hd, T, n_kv]
+    struct ggml_tensor * v_perm = ggml_permute(ctx, v, 0, 2, 1, 3);  // [hd, T, n_kv]
 
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, k_cache, k_perm, kv_rows));
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, v_cache, v_perm, kv_rows));
@@ -518,14 +513,9 @@ static struct ggml_tensor * talker_layer_forward_batch(struct ggml_context * ctx
     struct ggml_tensor * h = ggml_rms_norm(ctx, x, eps);
     h                      = ggml_mul(ctx, h, layer.input_norm_w);
 
-    // Q/K/V projections, batched over the N columns
-    struct ggml_tensor * q = ggml_mul_mat(ctx, layer.attn.q_proj_w, h);  // [n_q_heads*hd, N]
-    struct ggml_tensor * k = ggml_mul_mat(ctx, layer.attn.k_proj_w, h);  // [n_kv*hd, N]
-    struct ggml_tensor * v = ggml_mul_mat(ctx, layer.attn.v_proj_w, h);  // [n_kv*hd, N]
-
-    q = ggml_reshape_3d(ctx, q, hd, n_q_heads, N);                       // [hd, n_q_heads, N]
-    k = ggml_reshape_3d(ctx, k, hd, n_kv, N);
-    v = ggml_reshape_3d(ctx, v, hd, n_kv, N);
+    // Q/K/V projections batched over the N columns, [hd, heads, N]
+    struct ggml_tensor *q, *k, *v;
+    talker_qkv(ctx, layer.attn, h, n_q_heads, n_kv, hd, N, &q, &k, &v);
 
     // Per-head QK-norm: RMS over hd, then multiply by [hd] gain.
     q = ggml_rms_norm(ctx, q, eps);
@@ -549,7 +539,7 @@ static struct ggml_tensor * talker_layer_forward_batch(struct ggml_context * ctx
     struct ggml_tensor * k_sets = ggml_view_4d(ctx, k4, hd, k4->ne[1], n_kv, N, k4->nb[1], k4->nb[2], k4->nb[3], 0);
     struct ggml_tensor * v_sets = ggml_view_4d(ctx, v4, hd, v4->ne[1], n_kv, N, v4->nb[1], v4->nb[2], v4->nb[3], 0);
     struct ggml_tensor * k_new  = ggml_reshape_4d(ctx, k, hd, 1, n_kv, N);
-    struct ggml_tensor * v_new  = ggml_reshape_4d(ctx, v, hd, 1, n_kv, N);
+    struct ggml_tensor * v_new  = ggml_view_4d(ctx, v, hd, 1, n_kv, N, v->nb[1], v->nb[1], v->nb[2], 0);
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, k_sets, k_new, kv_rows));
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, v_sets, v_new, kv_rows));
 

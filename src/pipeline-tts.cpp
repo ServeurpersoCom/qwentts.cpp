@@ -249,12 +249,14 @@ bool pipeline_tts_load(PipelineTTS * pt,
         return false;
     }
 
+    const ggml_type kv_type = pt->use_flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32;
+
     // KV caches, one set per slot: the talker holds the LM context up
     // to 4096 positions (the longest ICL prompt observed is ~250 +
     // max_new_tokens ~ 1500, so 4096 has 60% headroom). Predictor holds
     // one frame of 16 sub-steps per slot.
     if (!kv_cache_init(&pt->talker_kv, pt->talker.num_hidden_layers, pt->talker.num_key_value_heads,
-                       pt->talker.head_dim, 4096, pt->max_batch, pt->backend)) {
+                       pt->talker.head_dim, 4096, pt->max_batch, kv_type, pt->backend)) {
         ggml_backend_sched_free(pt->sched);
         pt->sched = NULL;
         pipeline_codec_free(&pt->codec);
@@ -265,7 +267,7 @@ bool pipeline_tts_load(PipelineTTS * pt,
     }
     if (!kv_cache_init(&pt->code_predictor_kv, pt->code_predictor.num_hidden_layers,
                        pt->code_predictor.num_key_value_heads, pt->code_predictor.head_dim, pt->num_code_groups,
-                       pt->max_batch, pt->backend)) {
+                       pt->max_batch, kv_type, pt->backend)) {
         kv_cache_free(&pt->talker_kv);
         ggml_backend_sched_free(pt->sched);
         pt->sched = NULL;
