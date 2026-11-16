@@ -49,6 +49,7 @@ static void print_usage(const char * prog) {
             "Optional:\n"
             "  --device <name>         Compute device: CUDA0, Vulkan0, MTL0, CPU...\n"
             "                          (default: best available)\n"
+            "  --list-devices          Print the devices GGML sees (name, type, memory) and exit\n"
             "  --alias <name>          Report this model id instead of the GGUF file name\n"
             "  --host <ip>             Listen address (default: 127.0.0.1)\n"
             "  --port <n>              Listen port (default: 8080)\n"
@@ -83,7 +84,10 @@ int main(int argc, char ** argv) {
 
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
-        if (!std::strcmp(arg, "--model") && i + 1 < argc) {
+        if (!std::strcmp(arg, "--list-devices")) {
+            backend_print_devices();
+            return 0;
+        } else if (!std::strcmp(arg, "--model") && i + 1 < argc) {
             talker_path = argv[++i];
         } else if (!std::strcmp(arg, "--codec") && i + 1 < argc) {
             codec_path = argv[++i];

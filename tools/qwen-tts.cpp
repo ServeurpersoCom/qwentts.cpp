@@ -45,6 +45,7 @@ static void print_usage(const char * prog) {
             "Optional:\n"
             "  --device <name>         Compute device: CUDA0, Vulkan0, MTL0, CPU...\n"
             "                          (default: best available)\n"
+            "  --list-devices          Print the devices GGML sees (name, type, memory) and exit\n"
             "  --format <fmt>          WAV output format: wav16, wav24, wav32 (default: wav16)\n"
             "  --lang <name>           Language label (default: auto)\n"
             "  --instruct <str>        Style instruction. Required for VoiceDesign, optional for\n"
@@ -499,6 +500,12 @@ static int run(const Args & a) {
 }
 
 int main(int argc, char ** argv) {
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--list-devices") == 0) {
+            backend_print_devices();
+            return 0;
+        }
+    }
     Args a;
     if (!parse_args(argc, argv, a)) {
         print_usage(argv[0]);
