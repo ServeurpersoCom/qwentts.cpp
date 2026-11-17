@@ -135,9 +135,24 @@ static struct ggml_tensor * qwen_causal_trans_conv1d(struct ggml_context * ctx,
     return y;
 }
 
+// Conv1d as an implicit GEMM over a one row image, the patches only expand
+// in shared memory. Pad free.
+//   w: [k, IC, OC] f16, x: [T, IC, N] f32 T-first
+// Returns [T_out, OC, N] f32 T-first.
+static struct ggml_tensor * qwen_conv1d(struct ggml_context * ctx,
+                                        struct ggml_tensor *  w,
+                                        struct ggml_tensor *  x,
+                                        int                   s,
+                                        int                   d) {
+    struct ggml_tensor * y =
+        ggml_conv_2d_direct(ctx, ggml_reshape_4d(ctx, w, w->ne[0], 1, w->ne[1], w->ne[2]),
+                            ggml_reshape_4d(ctx, x, x->ne[0], 1, x->ne[1], x->ne[2]), s, 1, 0, 0, d, 1);
+    return ggml_reshape_3d(ctx, y, y->ne[0], y->ne[2], y->ne[3]);
+}
+
 // Causal Conv1d with optional stride. Left pad with (kernel_eff - stride),
-// add an extra right pad to align with stride boundaries, then run a
-// standard ggml_conv_1d. Matches MimiConv1d.causal forward exactly:
+// add an extra right pad to align with stride boundaries, then run
+// qwen_conv1d. Matches MimiConv1d.causal forward exactly:
 //   kernel_eff   = (k - 1) * d + 1
 //   padding_total = kernel_eff - stride
 //   extra_pad    = ceil((T + padding_total - kernel_eff) / stride) * stride
@@ -146,7 +161,7 @@ static struct ggml_tensor * qwen_causal_trans_conv1d(struct ggml_context * ctx,
 // The output length is (T + padding_total + extra_pad - kernel_eff) / stride + 1
 // = ceil(T / stride). Stride defaults to 1 to preserve the Qwen3 causal
 // path used by pre_conv and the DAC decoder.
-//   w: [k, IC, OC] f32, source layout (K, IC, OC) maps to ggml ne directly
+//   w: [k, IC, OC] f16, source layout (K, IC, OC) maps to ggml ne directly
 //   b: [OC] f32 or NULL
 //   x: [T, IC] f32 T-first
 //   pad_mode: CTC_PAD_CONSTANT (zero pad, default for SEANet and the DAC
@@ -204,10 +219,7 @@ static struct ggml_tensor * qwen_causal_conv1d(struct ggml_context * ctx,
         y = ggml_pad_ext(ctx, y, padding_tot, extra_pad, 0, 0, 0, 0, 0, 0);
     }
 
-    // ggml_conv_1d expects 3D input [T, IC, N], add the batch dim
-    y = ggml_reshape_3d(ctx, y, y->ne[0], y->ne[1], 1);
-    y = ggml_conv_1d(ctx, w, y, s, 0, d);
-    // squeeze batch back to 2D
+    y = qwen_conv1d(ctx, w, ggml_reshape_3d(ctx, y, y->ne[0], y->ne[1], 1), s, d);
     y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
 
     if (b) {
@@ -226,7 +238,7 @@ static struct ggml_tensor * qwen_causal_conv1d(struct ggml_context * ctx,
 // f32, backend resident and zero cleared at stream reset, so the first
 // call matches the offline zero pad bit for bit. The state write
 // depends on the concat output, so it always executes after the read.
-//   w: [k, IC, OC] f32, x: [T, IC, N] f32 T-first
+//   w: [k, IC, OC] f16, x: [T, IC, N] f32 T-first
 // Returns [T, OC, N] f32 T-first.
 static struct ggml_tensor * qwen_causal_conv1d_stream(struct ggml_context * ctx,
                                                       struct ggml_cgraph *  gf,
@@ -246,7 +258,7 @@ static struct ggml_tensor * qwen_causal_conv1d_stream(struct ggml_context * ctx,
                                              (size_t) (x_ext->ne[0] - L) * x_ext->nb[0]);
     ggml_build_forward_expand(gf, ggml_cpy(ctx, tail, state));
 
-    struct ggml_tensor * y = ggml_conv_1d(ctx, w, x_ext, 1, 0, d);  // [T, OC, N]
+    struct ggml_tensor * y = qwen_conv1d(ctx, w, x_ext, 1, d);  // [T, OC, N]
 
     if (b) {
         struct ggml_tensor * b2d = ggml_reshape_2d(ctx, b, 1, OC);

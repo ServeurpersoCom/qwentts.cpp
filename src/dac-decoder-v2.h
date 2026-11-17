@@ -285,7 +285,7 @@ static struct ggml_tensor * dac_res_unit_stream(struct ggml_context *  ctx,
     x                         = dac_snake(ctx, x, ru->act1);
     x                         = qwen_causal_conv1d_stream(ctx, gf, ru->c1w, ru->c1b, x, 7, ru->dilation, state);
     x                         = dac_snake(ctx, x, ru->act2);
-    x                         = ggml_conv_1d(ctx, ru->c2w, x, 1, 0, 1);
+    x                         = qwen_conv1d(ctx, ru->c2w, x, 1, 1);
     if (ru->c2b) {
         struct ggml_tensor * b2d = ggml_reshape_2d(ctx, ru->c2b, 1, ru->c2b->ne[0]);
         x                        = ggml_add(ctx, x, b2d);
