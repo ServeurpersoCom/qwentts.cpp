@@ -45,6 +45,7 @@ static void print_usage(const char * prog) {
             "Optional:\n"
             "  --device <name>         Compute device: CUDA0, Vulkan0, MTL0, CPU...\n"
             "                          (default: best available)\n"
+            "  --threads <n>           CPU threads (default: half the logical cores)\n"
             "  --format <fmt>          WAV output format: wav16, wav24, wav32 (default: wav16)\n"
             "  --lang <name>           Language label (default: auto)\n"
             "  --instruct <str>        Style instruction. Required for VoiceDesign, optional for\n"
@@ -91,6 +92,7 @@ struct Args {
     const char * out_wav;
     const char * format;
     const char * device;
+    int          n_threads;
     bool         use_fa;
     bool         clamp_fp16;
     bool         stream_by_line;
@@ -195,6 +197,11 @@ static bool parse_args(int argc, char ** argv, Args & a) {
             a.codec = argv[++i];
         } else if (std::strcmp(arg, "--device") == 0 && i + 1 < argc) {
             a.device = argv[++i];
+        } else if (std::strcmp(arg, "--threads") == 0 && i + 1 < argc) {
+            a.n_threads = std::atoi(argv[++i]);
+            if (a.n_threads <= 0) {
+                return false;
+            }
         } else if (std::strcmp(arg, "--lang") == 0 && i + 1 < argc) {
             a.lang = argv[++i];
         } else if (std::strcmp(arg, "--instruct") == 0 && i + 1 < argc) {
@@ -268,6 +275,7 @@ static int run(const Args & a) {
     iparams.clamp_fp16      = a.clamp_fp16;
     iparams.codec_chunk_sec = a.codec_chunk_sec;
     iparams.device          = a.device;
+    iparams.n_threads       = a.n_threads;
 
     qt_context * q = qt_init(&iparams);
     if (!q) {

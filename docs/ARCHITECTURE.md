@@ -554,6 +554,7 @@ Input:
 Optional:
   --device <name>         Compute device: CUDA0, Vulkan0, MTL0, CPU...
                           (default: best available)
+  --threads <n>           CPU threads (default: half the logical cores)
   --format <fmt>          WAV output format: wav16, wav24, wav32 (default: wav16)
   --lang <name>           Language label (default: auto)
   --instruct <str>        Style instruction. Required for VoiceDesign, optional for
@@ -599,6 +600,7 @@ Required:
 Optional:
   --device <name>         Compute device: CUDA0, Vulkan0, MTL0, CPU...
                           (default: best available)
+  --threads <n>           CPU threads (default: half the logical cores)
   -i <path>               Input. WAV -> encode, .rvq -> decode
   --talker <gguf>         Talker GGUF (Base only). Encode also extracts the speaker
                           embedding and writes it next to the .rvq as a .spk file
@@ -633,6 +635,7 @@ Required:
 Optional:
   --device <name>         Compute device: CUDA0, Vulkan0, MTL0, CPU...
                           (default: best available)
+  --threads <n>           CPU threads (default: half the logical cores)
   --alias <name>          Report this model id instead of the GGUF file name
   --host <ip>             Listen address (default: 127.0.0.1)
   --port <n>              Listen port (default: 8080)
@@ -770,7 +773,9 @@ is strict on the kernel dtype), independent of the GGUF storage dtype.
 
 `backend_init("MOD", device)` then `backend_sched_new(bp, max_nodes)`.
 `device` names the GGML device (`qt_init_params.device`, `--device` on
-the CLIs), NULL takes the best available one. Backend handles are shared
+the CLIs), NULL takes the best available one. The CPU backend runs
+`qt_init_params.n_threads` threads (`--threads` on the CLIs), 0 takes
+half the logical cores. Backend handles are shared
 across modules, refcounted. `use_fa` collapses to
 false on CPU-only backends. `clamp_fp16` inserts `ggml_clamp(-65504,
 65504)` on V before attention and on the residual stream between blocks

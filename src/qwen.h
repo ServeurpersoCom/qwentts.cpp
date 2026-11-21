@@ -59,7 +59,7 @@ extern "C" {
 // git short hash + commit date string returned by qt_version(); for
 // binding compat checks, QT_ABI_VERSION is the only number that
 // matters.
-#define QT_ABI_VERSION 6
+#define QT_ABI_VERSION 7
 
 // Oldest struct layout this build addresses. A v4 or older
 // qt_tts_params places its trailing fields at offsets this build does
@@ -161,11 +161,15 @@ struct qt_init_params {
     // GGML device the handle runs on, by name (CUDA0, Vulkan0, MTL0,
     // CPU...). NULL selects the best available device. Since ABI 6.
     const char * device;
+
+    // CPU compute threads of the handle. 0 selects half the logical
+    // cores. Since ABI 7.
+    int n_threads;
 };
 
 // Initialise to the standard defaults: both paths NULL (caller must set
 // them before calling qt_init), use_fa true, clamp_fp16 false,
-// max_batch 1, codec_chunk_sec 24.0, device NULL.
+// max_batch 1, codec_chunk_sec 24.0, device NULL, n_threads 0.
 QT_API void qt_init_default_params(struct qt_init_params * p);
 
 // Allocate every module described by params. Returns NULL on any

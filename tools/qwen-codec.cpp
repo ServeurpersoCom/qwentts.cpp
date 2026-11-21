@@ -43,6 +43,7 @@ static void print_usage(const char * prog) {
             "Optional:\n"
             "  --device <name>         Compute device: CUDA0, Vulkan0, MTL0, CPU...\n"
             "                          (default: best available)\n"
+            "  --threads <n>           CPU threads (default: half the logical cores)\n"
             "  -i <path>               Input. WAV -> encode, .rvq -> decode\n"
             "  --talker <gguf>         Talker GGUF (Base only). Encode also extracts the speaker\n"
             "                          embedding and writes it next to the .rvq as a .spk file\n"
@@ -141,6 +142,7 @@ int main(int argc, char ** argv) {
     const char * input_path  = NULL;
     const char * talker_path = NULL;
     const char * device      = NULL;
+    int          n_threads   = 0;
     WavFormat    wav_fmt     = WAV_S16;
 
     for (int i = 1; i < argc; i++) {
@@ -148,6 +150,12 @@ int main(int argc, char ** argv) {
             model_path = argv[++i];
         } else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             device = argv[++i];
+        } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+            n_threads = atoi(argv[++i]);
+            if (n_threads <= 0) {
+                print_usage(argv[0]);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--talker") == 0 && i + 1 < argc) {
             talker_path = argv[++i];
         } else if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
@@ -182,7 +190,7 @@ int main(int argc, char ** argv) {
         }
     }
 
-    BackendPair bp = backend_init("Codec", device);
+    BackendPair bp = backend_init("Codec", device, n_threads);
     if (!bp.backend) {
         fprintf(stderr, "[Codec] FATAL: backend init failed\n");
         return 1;
