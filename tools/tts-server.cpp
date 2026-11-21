@@ -53,6 +53,8 @@ static void print_usage(const char * prog) {
             "  --host <ip>             Listen address (default: 127.0.0.1)\n"
             "  --port <n>              Listen port (default: 8080)\n"
             "  --lang <name>           Language label when a request omits one (default: auto)\n"
+            "  --voice <name>          Voice when a request omits one (default: none, the model voice)\n"
+            "  --response-format <f>   Response format when a request omits one: pcm, wav (default: pcm)\n"
             "  --max-batch <n>         Concurrent requests batched on the GPU (default: 1)\n"
             "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
@@ -97,6 +99,14 @@ int main(int argc, char ** argv) {
             cfg.port = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--lang") && i + 1 < argc) {
             lang = argv[++i];
+        } else if (!std::strcmp(arg, "--voice") && i + 1 < argc) {
+            cfg.voice = argv[++i];
+        } else if (!std::strcmp(arg, "--response-format") && i + 1 < argc) {
+            cfg.response_format = argv[++i];
+            if (cfg.response_format != "pcm" && cfg.response_format != "wav") {
+                print_usage(argv[0]);
+                return 1;
+            }
         } else if (!std::strcmp(arg, "--no-fa")) {
             use_fa = false;
         } else if (!std::strcmp(arg, "--clamp-fp16")) {
