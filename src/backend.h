@@ -26,8 +26,11 @@ struct BackendPair {
 
 // Physical core count heuristic (logical / 2 for HT/SMT).
 // Used for GGML CPU thread count: GEMM shares SIMD units across hyperthreads,
-// so one thread per physical core is optimal.
-static int backend_cpu_n_threads(void) {
+// so one thread per physical core is optimal. A positive request wins.
+static int backend_cpu_n_threads(int requested) {
+    if (requested > 0) {
+        return requested;
+    }
     int n = (int) std::thread::hardware_concurrency() / 2;
     return n > 0 ? n : 1;
 }
@@ -131,7 +134,7 @@ static bool backend_check_device(const char * name) {
 // Each call returns a fresh backend pair with its own memory pool.
 // Returns a BackendPair with .backend == NULL when initialisation fails;
 // the caller must check this before passing it to any pipeline_*_load.
-static BackendPair backend_init(const char * label, const char * device) {
+static BackendPair backend_init(const char * label, const char * device, int n_threads_req = 0) {
     backend_load();
 
     BackendPair bp = {};
@@ -145,7 +148,7 @@ static BackendPair backend_init(const char * label, const char * device) {
         return BackendPair{};
     }
     bool best_is_cpu = (strcmp(ggml_backend_name(bp.backend), "CPU") == 0);
-    int  n_threads   = backend_cpu_n_threads();
+    int  n_threads   = backend_cpu_n_threads(n_threads_req);
     if (best_is_cpu) {
         ggml_backend_free(bp.backend);
         bp.backend     = cpu_backend_new(n_threads);

@@ -49,6 +49,7 @@ static void print_usage(const char * prog) {
             "Optional:\n"
             "  --device <name>         Compute device: CUDA0, Vulkan0, MTL0, CPU...\n"
             "                          (default: best available)\n"
+            "  --threads <n>           CPU threads (default: half the logical cores)\n"
             "  --alias <name>          Report this model id instead of the GGUF file name\n"
             "  --host <ip>             Listen address (default: 127.0.0.1)\n"
             "  --port <n>              Listen port (default: 8080)\n"
@@ -77,6 +78,7 @@ int main(int argc, char ** argv) {
     bool          use_fa          = true;
     bool          clamp_fp16      = false;
     int           max_batch       = 1;
+    int           n_threads       = 0;
     // Chunk sentinel : qt_init resolves a non positive value to the
     // library default.
     float         codec_chunk_dur = 0.0f;
@@ -89,6 +91,12 @@ int main(int argc, char ** argv) {
             codec_path = argv[++i];
         } else if (!std::strcmp(arg, "--device") && i + 1 < argc) {
             device = argv[++i];
+        } else if (!std::strcmp(arg, "--threads") && i + 1 < argc) {
+            n_threads = std::atoi(argv[++i]);
+            if (n_threads <= 0) {
+                print_usage(argv[0]);
+                return 1;
+            }
         } else if (!std::strcmp(arg, "--alias") && i + 1 < argc) {
             model_alias = argv[++i];
         } else if (!std::strcmp(arg, "--host") && i + 1 < argc) {
@@ -129,6 +137,7 @@ int main(int argc, char ** argv) {
     iparams.max_batch       = max_batch;
     iparams.codec_chunk_sec = codec_chunk_dur;
     iparams.device          = device;
+    iparams.n_threads       = n_threads;
 
     struct qt_context * q = qt_init(&iparams);
     if (!q) {

@@ -238,6 +238,7 @@ void qt_init_default_params(struct qt_init_params * p) {
 
     p->codec_chunk_sec = QT_CODEC_CHUNK_SEC_DEFAULT;
     p->device          = nullptr;
+    p->n_threads       = 0;
 }
 
 void qt_tts_default_params(struct qt_tts_params * p) {
@@ -459,9 +460,11 @@ struct qt_context * qt_init(const struct qt_init_params * params) {
     // qt_free, which is idempotent on partial state (NULL-safe sched,
     // NULL GGUF handles, refcount-correct backend release).
     try {
-        // The device field exists from ABI 6, an older struct takes the
-        // best available device.
-        q->bp = backend_init("Talker", params->abi_version >= 6 ? params->device : nullptr);
+        // The device field exists from ABI 6 and n_threads from ABI 7, an
+        // older struct takes the best available device and the default
+        // thread count.
+        q->bp = backend_init("Talker", params->abi_version >= 6 ? params->device : nullptr,
+                             params->abi_version >= 7 ? params->n_threads : 0);
         if (!q->bp.backend) {
             qt_throw("qt_init: backend_init failed (no GGML backend available)");
         }
