@@ -636,6 +636,8 @@ Optional:
   --alias <name>          Report this model id instead of the GGUF file name
   --host <ip>             Listen address (default: 127.0.0.1)
   --port <n>              Listen port (default: 8080)
+  --api-key <key>         Require "Authorization: Bearer <key>" on every route but /health
+  --api-key-file <path>   Read the API key from the first line of a file (keeps it out of ps)
   --lang <name>           Language label when a request omits one (default: auto)
   --max-batch <n>         Concurrent requests batched on the GPU (default: 1)
   --no-fa                 Disable flash attention
@@ -669,6 +671,11 @@ POST   /v1/audio/voices         register a cloned voice: {name, ref_text,
 DELETE /v1/audio/voices/{name}  drop a registered voice
 GET    /health                  liveness probe
 ```
+
+With `--api-key` or `--api-key-file` every route but `/health` and the
+CORS preflight answers 401 unless the request carries
+`Authorization: Bearer <key>`. Without either option every route stays
+open.
 
 A registered voice wins over a model speaker of the same name and
 injects the reference latents into `qt_tts_params` : `ref_text` present

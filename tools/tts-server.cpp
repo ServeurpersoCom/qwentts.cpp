@@ -10,10 +10,12 @@
 #include "rvq-file.h"
 #include "version.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -52,6 +54,8 @@ static void print_usage(const char * prog) {
             "  --alias <name>          Report this model id instead of the GGUF file name\n"
             "  --host <ip>             Listen address (default: 127.0.0.1)\n"
             "  --port <n>              Listen port (default: 8080)\n"
+            "  --api-key <key>         Require \"Authorization: Bearer <key>\" on every route but /health\n"
+            "  --api-key-file <path>   Read the API key from the first line of a file (keeps it out of ps)\n"
             "  --lang <name>           Language label when a request omits one (default: auto)\n"
             "  --max-batch <n>         Concurrent requests batched on the GPU (default: 1)\n"
             "  --no-fa                 Disable flash attention\n"
@@ -95,6 +99,26 @@ int main(int argc, char ** argv) {
             cfg.host = argv[++i];
         } else if (!std::strcmp(arg, "--port") && i + 1 < argc) {
             cfg.port = std::atoi(argv[++i]);
+        } else if (!std::strcmp(arg, "--api-key") && i + 1 < argc) {
+            cfg.api_key = argv[++i];
+            if (cfg.api_key.empty()) {
+                fprintf(stderr, "[Server] FATAL: --api-key is empty\n");
+                return 1;
+            }
+        } else if (!std::strcmp(arg, "--api-key-file") && i + 1 < argc) {
+            const char *  path = argv[++i];
+            std::ifstream f(path);
+            if (!f || !std::getline(f, cfg.api_key)) {
+                fprintf(stderr, "[Server] FATAL: cannot read the API key from %s\n", path);
+                return 1;
+            }
+            while (!cfg.api_key.empty() && std::isspace((unsigned char) cfg.api_key.back())) {
+                cfg.api_key.pop_back();
+            }
+            if (cfg.api_key.empty()) {
+                fprintf(stderr, "[Server] FATAL: %s holds no API key on its first line\n", path);
+                return 1;
+            }
         } else if (!std::strcmp(arg, "--lang") && i + 1 < argc) {
             lang = argv[++i];
         } else if (!std::strcmp(arg, "--no-fa")) {
