@@ -107,6 +107,8 @@ struct server_config {
     // Empty leaves every route open. Otherwise every route but /health
     // and the CORS preflight requires "Authorization: Bearer <api_key>".
     std::string api_key;
+    // Access-Control-Allow-Origin value; empty sends no CORS headers.
+    std::string cors_origin = "*";
 };
 
 // Runs in time independent of the first mismatch, so the response time
@@ -625,14 +627,17 @@ static int tts_server_run(const tts_backend & be, const server_config & cfg) {
 #endif
     });
 
-    // permissive CORS so a browser client can call the API directly.
-    svr.set_default_headers({
-        { "Access-Control-Allow-Origin", "*" }
-    });
-    svr.Options("/.*", [](const httplib::Request &, httplib::Response & res) {
-        res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-        res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    });
+    // CORS lets a browser client call the API directly, permissive unless
+    // --cors-origin narrows or disables it.
+    if (!cfg.cors_origin.empty()) {
+        svr.set_default_headers({
+            { "Access-Control-Allow-Origin", cfg.cors_origin }
+        });
+        svr.Options("/.*", [](const httplib::Request &, httplib::Response & res) {
+            res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+            res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        });
+    }
 
     // Browsers send the CORS preflight without credentials, so OPTIONS
     // stays open like /health.

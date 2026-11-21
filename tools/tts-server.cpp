@@ -56,6 +56,8 @@ static void print_usage(const char * prog) {
             "  --port <n>              Listen port (default: 8080)\n"
             "  --api-key <key>         Require \"Authorization: Bearer <key>\" on every route but /health\n"
             "  --api-key-file <path>   Read the API key from the first line of a file (keeps it out of ps)\n"
+            "  --cors-origin <origin>  Access-Control-Allow-Origin value, 'none' sends no CORS headers\n"
+            "                          (default: *)\n"
             "  --lang <name>           Language label when a request omits one (default: auto)\n"
             "  --max-batch <n>         Concurrent requests batched on the GPU (default: 1)\n"
             "  --no-fa                 Disable flash attention\n"
@@ -117,6 +119,14 @@ int main(int argc, char ** argv) {
             }
             if (cfg.api_key.empty()) {
                 fprintf(stderr, "[Server] FATAL: %s holds no API key on its first line\n", path);
+                return 1;
+            }
+        } else if (!std::strcmp(arg, "--cors-origin") && i + 1 < argc) {
+            cfg.cors_origin = argv[++i];
+            if (cfg.cors_origin == "none") {
+                cfg.cors_origin.clear();
+            } else if (cfg.cors_origin.empty()) {
+                print_usage(argv[0]);
                 return 1;
             }
         } else if (!std::strcmp(arg, "--lang") && i + 1 < argc) {

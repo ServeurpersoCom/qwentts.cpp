@@ -638,6 +638,8 @@ Optional:
   --port <n>              Listen port (default: 8080)
   --api-key <key>         Require "Authorization: Bearer <key>" on every route but /health
   --api-key-file <path>   Read the API key from the first line of a file (keeps it out of ps)
+  --cors-origin <origin>  Access-Control-Allow-Origin value, 'none' sends no CORS headers
+                          (default: *)
   --lang <name>           Language label when a request omits one (default: auto)
   --max-batch <n>         Concurrent requests batched on the GPU (default: 1)
   --no-fa                 Disable flash attention
@@ -676,6 +678,12 @@ With `--api-key` or `--api-key-file` every route but `/health` and the
 CORS preflight answers 401 unless the request carries
 `Authorization: Bearer <key>`. Without either option every route stays
 open.
+
+Every response carries `Access-Control-Allow-Origin: *` so a browser
+client can call the API directly. `--cors-origin <origin>` restricts it
+to one origin, `--cors-origin none` drops the CORS headers and the
+OPTIONS route, so pages in a local browser can no longer read the
+responses.
 
 A registered voice wins over a model speaker of the same name and
 injects the reference latents into `qt_tts_params` : `ref_text` present
