@@ -20,7 +20,8 @@
 //
 // Audio out: response_format "pcm" streams s16le 24 kHz mono chunked as it
 // is generated (real time), "wav" returns a one-shot RIFF file. pcm is the
-// default so streaming is on unless the client asks for a file.
+// default so streaming is on unless the client or the server config asks
+// for a file.
 
 #include "../vendor/cpp-httplib/httplib.h"
 #include "audio-io.h"
@@ -104,6 +105,9 @@ struct tts_backend {
 struct server_config {
     std::string host = "127.0.0.1";
     int         port = 8080;
+    // Fill a speech request that omits voice or response_format.
+    std::string voice;
+    std::string response_format = "pcm";
 };
 
 // Concurrency lives behind the ABI: qt_synthesize is thread safe and
@@ -165,7 +169,10 @@ static void tts_json_error(httplib::Response & res, int status, const char * typ
 }
 
 // Parse the OAI body into req. Returns false and fills err on bad input.
-static bool tts_parse_request(const std::string & body, tts_request & req, std::string & err) {
+static bool tts_parse_request(const server_config & cfg,
+                              const std::string &   body,
+                              tts_request &         req,
+                              std::string &         err) {
     yyjson_doc * doc = yyjson_read(body.c_str(), body.size(), 0);
     if (!doc) {
         err = "request body is not valid JSON";
@@ -187,7 +194,7 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
     req.input = yyjson_get_str(input);
 
     yyjson_val * voice = yyjson_obj_get(root, "voice");
-    req.voice          = yyjson_is_str(voice) ? tts_voice_name(yyjson_get_str(voice)) : "";
+    req.voice          = tts_voice_name(yyjson_is_str(voice) ? yyjson_get_str(voice) : cfg.voice.c_str());
 
     yyjson_val * language = yyjson_obj_get(root, "language");
     req.lang              = yyjson_is_str(language) ? yyjson_get_str(language) : "";
@@ -196,7 +203,7 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
     req.instructions          = yyjson_is_str(instructions) ? yyjson_get_str(instructions) : "";
 
     yyjson_val * fmt = yyjson_obj_get(root, "response_format");
-    req.format       = yyjson_is_str(fmt) ? yyjson_get_str(fmt) : "pcm";
+    req.format       = yyjson_is_str(fmt) ? yyjson_get_str(fmt) : cfg.response_format;
 
     yyjson_val * speed = yyjson_obj_get(root, "speed");
     req.speed          = yyjson_is_num(speed) ? (float) yyjson_get_num(speed) : 1.0f;
@@ -277,10 +284,13 @@ static int tts_status_to_http(int rc) {
     return 502;
 }
 
-static void tts_handle_speech(const tts_backend & be, const httplib::Request & http_req, httplib::Response & res) {
+static void tts_handle_speech(const tts_backend &      be,
+                              const server_config &    cfg,
+                              const httplib::Request & http_req,
+                              httplib::Response &      res) {
     tts_request req;
     std::string err;
-    if (!tts_parse_request(http_req.body, req, err)) {
+    if (!tts_parse_request(cfg, http_req.body, req, err)) {
         tts_json_error(res, 400, "invalid_request_error", err.c_str());
         return;
     }
@@ -621,7 +631,9 @@ static int tts_server_run(const tts_backend & be, const server_config & cfg) {
     });
 
     svr.Post("/v1/audio/speech",
-             [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_speech(be, req, res); });
+             [&be, &cfg](const httplib::Request & req, httplib::Response & res) {
+                 tts_handle_speech(be, cfg, req, res);
+             });
     svr.Get("/v1/models",
             [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_models(be, req, res); });
     svr.Get("/v1/audio/voices",
