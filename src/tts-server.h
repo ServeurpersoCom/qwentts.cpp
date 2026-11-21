@@ -104,7 +104,23 @@ struct tts_backend {
 struct server_config {
     std::string host = "127.0.0.1";
     int         port = 8080;
+    // Empty leaves every route open. Otherwise every route but /health
+    // and the CORS preflight requires "Authorization: Bearer <api_key>".
+    std::string api_key;
+    // Access-Control-Allow-Origin value; empty sends no CORS headers.
+    std::string cors_origin = "*";
 };
+
+// Runs in time independent of the first mismatch, so the response time
+// does not leak how much of a guessed key is right.
+static bool tts_key_equal(const std::string & a, const std::string & b) {
+    size_t diff = a.size() ^ b.size();
+    size_t n    = a.size() < b.size() ? a.size() : b.size();
+    for (size_t i = 0; i < n; i++) {
+        diff |= (size_t) (unsigned char) (a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
 
 // Concurrency lives behind the ABI: qt_synthesize is thread safe and
 // batches concurrent requests when the context was initialised with
@@ -611,14 +627,33 @@ static int tts_server_run(const tts_backend & be, const server_config & cfg) {
 #endif
     });
 
-    // permissive CORS so a browser client can call the API directly.
-    svr.set_default_headers({
-        { "Access-Control-Allow-Origin", "*" }
-    });
-    svr.Options("/.*", [](const httplib::Request &, httplib::Response & res) {
-        res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-        res.set_header("Access-Control-Allow-Headers", "Content-Type");
-    });
+    // CORS lets a browser client call the API directly, permissive unless
+    // --cors-origin narrows or disables it.
+    if (!cfg.cors_origin.empty()) {
+        svr.set_default_headers({
+            { "Access-Control-Allow-Origin", cfg.cors_origin }
+        });
+        svr.Options("/.*", [](const httplib::Request &, httplib::Response & res) {
+            res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+            res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        });
+    }
+
+    // Browsers send the CORS preflight without credentials, so OPTIONS
+    // stays open like /health.
+    if (!cfg.api_key.empty()) {
+        const std::string want = "Bearer " + cfg.api_key;
+        svr.set_pre_routing_handler([want](const httplib::Request & req, httplib::Response & res) {
+            if (req.path == "/health" || req.method == "OPTIONS") {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+            if (!tts_key_equal(req.get_header_value("Authorization"), want)) {
+                tts_json_error(res, 401, "invalid_request_error", "missing or invalid API key");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        });
+    }
 
     svr.Post("/v1/audio/speech",
              [&be](const httplib::Request & req, httplib::Response & res) { tts_handle_speech(be, req, res); });
